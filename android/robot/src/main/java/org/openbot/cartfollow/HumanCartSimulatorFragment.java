@@ -37,6 +37,11 @@ import timber.log.Timber;
 
 public class HumanCartSimulatorFragment extends CameraFragment {
 
+  private static final int COLOR_TARGET = 0;
+  private static final int COLOR_CANDIDATE = 1;
+  private static final int COLOR_NORMAL = 2;
+  private static final int COLOR_FAIL = 3;
+
   private FragmentHumanCartSimulatorBinding binding;
   private Handler handler;
   private HandlerThread handlerThread;
@@ -60,6 +65,9 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private final ControlGenerator controlGenerator = new ControlGenerator();
   private final HumanCommandInterpreter interpreter = new HumanCommandInterpreter();
+  private final TargetMatcher matcher = new TargetMatcher();
+  private final FollowStateMachine stateMachine =
+      new FollowStateMachine(matcher, controlGenerator);
 
   private final List<DrawBox> drawBoxes = new ArrayList<>();
   private int drawFrameWidth = 0;
@@ -67,7 +75,9 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private int drawSensorOrientation = 0;
 
   private final Paint targetBoxPaint = new Paint();
+  private final Paint candidateBoxPaint = new Paint();
   private final Paint personBoxPaint = new Paint();
+  private final Paint failBoxPaint = new Paint();
   private final Paint boxTextPaint = new Paint();
 
   @Override
@@ -76,9 +86,15 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     targetBoxPaint.setColor(Color.GREEN);
     targetBoxPaint.setStyle(Paint.Style.STROKE);
     targetBoxPaint.setStrokeWidth(8.0f);
+    candidateBoxPaint.setColor(Color.YELLOW);
+    candidateBoxPaint.setStyle(Paint.Style.STROKE);
+    candidateBoxPaint.setStrokeWidth(8.0f);
     personBoxPaint.setColor(Color.WHITE);
     personBoxPaint.setStyle(Paint.Style.STROKE);
     personBoxPaint.setStrokeWidth(6.0f);
+    failBoxPaint.setColor(Color.RED);
+    failBoxPaint.setStyle(Paint.Style.STROKE);
+    failBoxPaint.setStrokeWidth(8.0f);
     boxTextPaint.setColor(Color.WHITE);
     boxTextPaint.setTextSize(40.0f);
   }
@@ -121,17 +137,32 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
     binding.trackingOverlay.addCallback(canvas -> drawOverlay(canvas));
 
+    binding.btnConfirm.setOnClickListener(v -> stateMachine.confirm());
+    binding.btnRetake.setOnClickListener(v -> stateMachine.retake());
+    binding.btnCancel.setOnClickListener(v -> stateMachine.cancel());
+
     binding.startSwitch.setChecked(false);
     binding.startSwitch.setOnClickListener(
         v -> {
           if (binding.startSwitch.isChecked()) {
             binding.modelSpinner.setEnabled(false);
+            stateMachine.startCapture();
           } else {
             binding.modelSpinner.setEnabled(true);
-            updateCommandText(getString(R.string.cart_sim_idle));
-            updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f);
+            stateMachine.cancel();
+            resetUiToIdle();
           }
         });
+  }
+
+  private void resetUiToIdle() {
+    updateCommandText(getString(R.string.cart_sim_idle));
+    updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f);
+    if (binding != null) {
+      binding.confirmPanel.setVisibility(View.GONE);
+      binding.countdownText.setVisibility(View.GONE);
+      binding.trackingOverlay.postInvalidate();
+    }
   }
 
   protected void onInferenceConfigurationChanged() {
@@ -241,9 +272,11 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     runInBackground(
         () -> {
           final Canvas canvas = new Canvas(croppedBitmap);
+          Bitmap workingFrame = bitmap;
           if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
-            canvas.drawBitmap(
-                CameraUtils.flipBitmapHorizontal(bitmap), frameToCropTransform, null);
+            Bitmap flipped = CameraUtils.flipBitmapHorizontal(bitmap);
+            canvas.drawBitmap(flipped, frameToCropTransform, null);
+            workingFrame = flipped;
           } else {
             canvas.drawBitmap(bitmap, frameToCropTransform, null);
           }
@@ -266,20 +299,15 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
             int frameW = getMaxAnalyseImageSize().getWidth();
             int frameH = getMaxAnalyseImageSize().getHeight();
-            ControlGenerator.Result gen =
-                controlGenerator.generate(mappedRecognitions, frameW, frameH, sensorOrientation);
+            FollowStateMachine.FrameResult fr =
+                stateMachine.onFrame(
+                    mappedRecognitions, workingFrame, frameW, frameH, sensorOrientation);
 
-            FollowState state;
-            if (gen.target == null) state = FollowState.LOST;
-            else if (gen.tooClose) state = FollowState.STOP;
-            else state = FollowState.FOLLOW;
-
-            String command = interpreter.interpret(gen.control, state, gen.tooClose);
-
-            updateDrawState(mappedRecognitions, gen.target, frameW, frameH, sensorOrientation);
-            updateCommandText(command);
+            updateDrawState(fr, frameW, frameH, sensorOrientation);
+            updateCommandText(commandForState(fr));
             float fps = lastProcessingTimeMs > 0 ? 1000f / lastProcessingTimeMs : 0f;
-            updateDebugInfo(state, gen.control, gen.persons.size(), fps);
+            updateDebugInfo(fr.state, fr.control, fr.persons.size(), fps);
+            updateUiForState(fr);
             binding.trackingOverlay.postInvalidate();
           }
           computingNetwork = false;
@@ -292,15 +320,17 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   }
 
   private synchronized void updateDrawState(
-      List<Detector.Recognition> recognitions,
-      Detector.Recognition target,
-      int frameW,
-      int frameH,
-      int sensorOrientation) {
+      FollowStateMachine.FrameResult fr, int frameW, int frameH, int sensorOrientation) {
     drawBoxes.clear();
-    for (Detector.Recognition r : recognitions) {
-      if (r.getLocation() == null) continue;
-      drawBoxes.add(new DrawBox(new RectF(r.getLocation()), r == target));
+    for (Detector.Recognition r : fr.persons) {
+      if (r == null || r.getLocation() == null) continue;
+      int colorType = COLOR_NORMAL;
+      if (r == fr.target) {
+        colorType = fr.matched ? COLOR_TARGET : COLOR_FAIL;
+      } else if (r == fr.candidate) {
+        colorType = COLOR_CANDIDATE;
+      }
+      drawBoxes.add(new DrawBox(new RectF(r.getLocation()), colorType));
     }
     drawFrameWidth = frameW;
     drawFrameHeight = frameH;
@@ -331,18 +361,83 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     for (DrawBox box : snapshot) {
       RectF rect = new RectF(box.location);
       matrix.mapRect(rect);
-      Paint paint = box.isTarget ? targetBoxPaint : personBoxPaint;
+      Paint paint;
+      String label = null;
+      switch (box.colorType) {
+        case COLOR_TARGET:
+          paint = targetBoxPaint;
+          label = "目标";
+          break;
+        case COLOR_CANDIDATE:
+          paint = candidateBoxPaint;
+          label = "候选";
+          break;
+        case COLOR_FAIL:
+          paint = failBoxPaint;
+          label = "匹配失败";
+          break;
+        default:
+          paint = personBoxPaint;
+          break;
+      }
       float cornerSize = Math.min(rect.width(), rect.height()) / 8.0f;
       canvas.drawRoundRect(rect, cornerSize, cornerSize, paint);
-      if (box.isTarget) {
-        canvas.drawText("目标", rect.left + cornerSize, rect.top, boxTextPaint);
+      if (label != null) {
+        canvas.drawText(label, rect.left + cornerSize, rect.top, boxTextPaint);
       }
+    }
+  }
+
+  private String commandForState(FollowStateMachine.FrameResult fr) {
+    switch (fr.state) {
+      case IDLE:
+        return "待命，打开 Start 开始采集目标";
+      case CAPTURE_TARGET:
+        return "采集中，请保持站立";
+      case LOCKED_PENDING_CONFIRM:
+        return "请确认是否跟随此人";
+      case CONFIRMED_ARMED:
+        return "已确认，请回到车前";
+      case REACQUIRE_TARGET:
+        return "重识别中…";
+      case READY_TO_FOLLOW:
+        return fr.countdownSec >= 0 ? fr.countdownSec + " 秒后启动" : "准备启动";
+      case FOLLOW:
+        return interpreter.interpret(fr.control, fr.state, fr.tooClose);
+      case LOST:
+        return "目标丢失，请停止";
+      case SEARCH:
+        return "原地搜索中…";
+      case STOP:
+        return "已停止";
+      default:
+        return "请停止";
     }
   }
 
   private void updateCommandText(String text) {
     if (binding == null) return;
     requireActivity().runOnUiThread(() -> binding.commandText.setText(text));
+  }
+
+  private void updateUiForState(FollowStateMachine.FrameResult fr) {
+    if (binding == null) return;
+    requireActivity()
+        .runOnUiThread(
+            () -> {
+              if (binding == null) return;
+              boolean showConfirm = fr.state == FollowState.LOCKED_PENDING_CONFIRM;
+              binding.confirmPanel.setVisibility(showConfirm ? View.VISIBLE : View.GONE);
+              if (showConfirm && fr.snapshot != null) {
+                binding.snapshotView.setImageBitmap(fr.snapshot);
+              }
+              boolean showCountdown = fr.state == FollowState.READY_TO_FOLLOW;
+              binding.countdownText.setVisibility(showCountdown ? View.VISIBLE : View.GONE);
+              if (showCountdown) {
+                binding.countdownText.setText(
+                    fr.countdownSec >= 0 ? String.valueOf(fr.countdownSec) : "");
+              }
+            });
   }
 
   private void updateDebugInfo(FollowState state, Control control, int persons, float fps) {
@@ -386,11 +481,11 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private static class DrawBox {
     final RectF location;
-    final boolean isTarget;
+    final int colorType;
 
-    DrawBox(RectF location, boolean isTarget) {
+    DrawBox(RectF location, int colorType) {
       this.location = location;
-      this.isTarget = isTarget;
+      this.colorType = colorType;
     }
   }
 }

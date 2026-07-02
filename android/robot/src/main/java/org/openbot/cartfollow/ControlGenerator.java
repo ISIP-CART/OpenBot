@@ -56,6 +56,15 @@ public class ControlGenerator {
       }
     }
 
+    return generateFromTarget(target, persons, frameW, frameH, sensorOrientation);
+  }
+
+  public Result generateFromTarget(
+      Recognition target, List<Recognition> persons, int frameW, int frameH, int sensorOrientation) {
+    if (target == null || target.getLocation() == null || frameW <= 0 || frameH <= 0) {
+      return new Result(new Control(0f, 0f), null, persons == null ? new ArrayList<>() : persons, false);
+    }
+
     RectF loc = target.getLocation();
     boolean rotated = sensorOrientation % 180 == 90;
     float imgWidth = rotated ? frameH : frameW;
