@@ -26,6 +26,9 @@
             android:id="@+id/action_mainFragment_to_objectNavFragment"
             app:destination="@id/objectNavFragment" />
         <action
+            android:id="@+id/action_mainFragment_to_cartSimFragment"
+            app:destination="@id/cartSimFragment" />
+        <action
             android:id="@+id/action_mainFragment_to_modelManagementFragment"
             app:destination="@id/modelManagementFragment" />
         <action
@@ -110,6 +113,12 @@
         android:name="org.openbot.objectNav.ObjectNavFragment"
         android:label="fragment_object_nav"
         tools:layout="@layout/fragment_object_nav" />
+
+    <fragment
+        android:id="@+id/cartSimFragment"
+        android:name="org.openbot.cartfollow.HumanCartSimulatorFragment"
+        android:label="fragment_human_cart_simulator"
+        tools:layout="@layout/fragment_human_cart_simulator" />
 
     <fragment
         android:id="@+id/modelManagementFragment"
