@@ -114,9 +114,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
           controlGenerator.MIN_CONFIDENCE = minConfidence;
         });
 
-    List<String> models =
-        getModelNames(
-            f -> f.type.equals(Model.TYPE.DETECTOR) && f.pathType != Model.PATH_TYPE.URL);
+    List<String> models = getModelNames(f -> f.type.equals(Model.TYPE.DETECTOR));
     initModelSpinner(binding.modelSpinner, models, preferencesManager.getObjectNavModel());
 
     setAnalyserResolution(Enums.Preview.HD.getValue());
@@ -147,12 +145,28 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private void recreateNetwork(Model model, Network.Device device, int numThreads) {
     if (model == null) return;
+    Detector newDetector = null;
+    try {
+      newDetector = Detector.create(requireActivity(), model, device, numThreads);
+    } catch (IllegalArgumentException | IOException e) {
+      Timber.e(e, "Failed to create network.");
+      String msg =
+          model.pathType == Model.PATH_TYPE.URL
+              ? "该模型未下载，请先在主菜单 Model Management 中下载: " + model.name
+              : "模型加载失败: " + e.getMessage();
+      requireActivity()
+          .runOnUiThread(
+              () ->
+                  Toast.makeText(requireContext().getApplicationContext(), msg, Toast.LENGTH_LONG)
+                      .show());
+      return;
+    }
+
     if (detector != null) {
       detector.close();
-      detector = null;
     }
+    detector = newDetector;
     try {
-      detector = Detector.create(requireActivity(), model, device, numThreads);
       croppedBitmap =
           Bitmap.createBitmap(
               detector.getImageSizeX(), detector.getImageSizeY(), Bitmap.Config.ARGB_8888);
@@ -167,14 +181,14 @@ public class HumanCartSimulatorFragment extends CameraFragment {
               detector.getMaintainAspect());
       cropToFrameTransform = new Matrix();
       frameToCropTransform.invert(cropToFrameTransform);
-    } catch (IllegalArgumentException | IOException e) {
-      Timber.e(e, "Failed to create network.");
+    } catch (Exception e) {
+      Timber.e(e, "Failed to configure detector.");
       requireActivity()
           .runOnUiThread(
               () ->
                   Toast.makeText(
                           requireContext().getApplicationContext(),
-                          e.getMessage(),
+                          "模型配置失败: " + e.getMessage(),
                           Toast.LENGTH_LONG)
                       .show());
     }

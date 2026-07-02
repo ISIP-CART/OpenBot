@@ -28,7 +28,7 @@ public class ControlGenerator {
   public float MAX_FORWARD = 0.6f;
   public float MIN_CONFIDENCE = 0.5f;
   public float TOO_CLOSE_H_RATIO = 0.75f;
-  public boolean FLIP_TURN = false;
+  public boolean FLIP_TURN = true;
 
   public Result generate(List<Recognition> results, int frameW, int frameH, int sensorOrientation) {
     List<Recognition> persons = new ArrayList<>();
