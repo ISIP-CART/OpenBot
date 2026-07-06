@@ -157,7 +157,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private void resetUiToIdle() {
     updateCommandText(getString(R.string.cart_sim_idle));
-    updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f);
+    updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f, null);
     if (binding != null) {
       binding.confirmPanel.setVisibility(View.GONE);
       binding.countdownText.setVisibility(View.GONE);
@@ -306,7 +306,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             updateDrawState(fr, frameW, frameH, sensorOrientation);
             updateCommandText(commandForState(fr));
             float fps = lastProcessingTimeMs > 0 ? 1000f / lastProcessingTimeMs : 0f;
-            updateDebugInfo(fr.state, fr.control, fr.persons.size(), fps);
+            updateDebugInfo(fr.state, fr.control, fr.persons.size(), fps, fr.distanceEstimate);
             updateUiForState(fr);
             binding.trackingOverlay.postInvalidate();
           }
@@ -403,6 +403,9 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       case READY_TO_FOLLOW:
         return fr.countdownSec >= 0 ? fr.countdownSec + " 秒后启动" : "准备启动";
       case FOLLOW:
+        if (fr.distanceEstimate != null) {
+          return interpreter.interpret(fr.control, fr.state, fr.distanceEstimate.state);
+        }
         return interpreter.interpret(fr.control, fr.state, fr.tooClose);
       case LOST:
         return "目标丢失，请停止";
@@ -440,21 +443,41 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             });
   }
 
-  private void updateDebugInfo(FollowState state, Control control, int persons, float fps) {
+  private void updateDebugInfo(
+      FollowState state,
+      Control control,
+      int persons,
+      float fps,
+      ImageSetpointDistanceEstimator.DistanceEstimate dist) {
     if (binding == null) return;
     float forward = (control.getLeft() + control.getRight()) / 2f;
     float turn = (control.getRight() - control.getLeft()) / 2f;
+    String distLine;
+    if (dist != null) {
+      distLine =
+          String.format(
+              Locale.US,
+              "dist=%s\nhScale=%.2f\naScale=%.2f\nbShift=%+.3f\ndistConf=%.2f",
+              dist.state.name(),
+              dist.heightScale,
+              dist.areaScale,
+              dist.bottomShift,
+              dist.confidence);
+    } else {
+      distLine = "dist=-";
+    }
     String info =
         String.format(
             Locale.US,
-            "state=%s\nforward=%.2f\nturn=%.2f\nleft=%.2f\nright=%.2f\npersons=%d\nfps=%.1f",
+            "state=%s\nforward=%.2f\nturn=%.2f\nleft=%.2f\nright=%.2f\npersons=%d\nfps=%.1f\n%s",
             state.name(),
             forward,
             turn,
             control.getLeft(),
             control.getRight(),
             persons,
-            fps);
+            fps,
+            distLine);
     requireActivity().runOnUiThread(() -> binding.debugInfo.setText(info));
   }
 
