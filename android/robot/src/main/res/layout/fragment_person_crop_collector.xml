@@ -86,6 +86,52 @@
             android:orientation="horizontal">
 
             <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.4"
+                android:paddingStart="8dp"
+                android:text="@string/confidence"
+                android:textColor="@android:color/white" />
+
+            <ImageView
+                android:id="@+id/minus_confidence"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="0.3"
+                android:contentDescription="@string/minus"
+                android:src="@drawable/ic_baseline_remove" />
+
+            <TextView
+                android:id="@+id/confidence_value"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.4"
+                android:gravity="center"
+                android:padding="4dp"
+                android:text="50%"
+                android:textColor="@android:color/white" />
+
+            <ImageView
+                android:id="@+id/plus_confidence"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="0.3"
+                android:contentDescription="@string/plus"
+                android:src="@drawable/ic_baseline_add" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="0.6" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:paddingStart="8dp"
