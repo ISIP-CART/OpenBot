@@ -29,6 +29,9 @@
             android:id="@+id/action_mainFragment_to_cartSimFragment"
             app:destination="@id/cartSimFragment" />
         <action
+            android:id="@+id/action_mainFragment_to_personCropCollectorFragment"
+            app:destination="@id/personCropCollectorFragment" />
+        <action
             android:id="@+id/action_mainFragment_to_modelManagementFragment"
             app:destination="@id/modelManagementFragment" />
         <action
@@ -119,6 +122,12 @@
         android:name="org.openbot.cartfollow.HumanCartSimulatorFragment"
         android:label="fragment_human_cart_simulator"
         tools:layout="@layout/fragment_human_cart_simulator" />
+
+    <fragment
+        android:id="@+id/personCropCollectorFragment"
+        android:name="org.openbot.cropcollector.PersonCropCollectorFragment"
+        android:label="fragment_person_crop_collector"
+        tools:layout="@layout/fragment_person_crop_collector" />
 
     <fragment
         android:id="@+id/modelManagementFragment"

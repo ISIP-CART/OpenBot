@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".cropcollector.PersonCropCollectorFragment">
+
+    <org.openbot.customview.OverlayView
+        android:id="@+id/tracking_overlay"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <TextView
+        android:id="@+id/status_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="80dp"
+        android:background="#80000000"
+        android:paddingHorizontal="24dp"
+        android:paddingVertical="12dp"
+        android:text="@string/person_crop_idle"
+        android:textColor="#FFFFFF"
+        android:textSize="28sp"
+        android:textStyle="bold"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <TextView
+        android:id="@+id/debug_info"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="12dp"
+        android:background="#80000000"
+        android:fontFamily="monospace"
+        android:padding="8dp"
+        android:textColor="#FFFFFF"
+        android:textSize="12sp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="persons=0\nsaved=0\nskipped=0\nfps=0.0" />
+
+    <LinearLayout
+        android:id="@+id/bottom_panel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="#CC000000"
+        android:orientation="vertical"
+        android:padding="12dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.4"
+                android:paddingVertical="12dp"
+                android:paddingStart="8dp"
+                android:text="@string/model"
+                android:textColor="@android:color/white" />
+
+            <Spinner
+                android:id="@+id/model_spinner"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1.6"
+                android:prompt="@string/model" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.4"
+                android:paddingStart="8dp"
+                android:text="@string/confidence"
+                android:textColor="@android:color/white" />
+
+            <ImageView
+                android:id="@+id/minus_confidence"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="0.3"
+                android:contentDescription="@string/minus"
+                android:src="@drawable/ic_baseline_remove" />
+
+            <TextView
+                android:id="@+id/confidence_value"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.4"
+                android:gravity="center"
+                android:padding="4dp"
+                android:text="50%"
+                android:textColor="@android:color/white" />
+
+            <ImageView
+                android:id="@+id/plus_confidence"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="0.3"
+                android:contentDescription="@string/plus"
+                android:src="@drawable/ic_baseline_add" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="0.6" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.4"
+                android:paddingStart="8dp"
+                android:text="Interval:"
+                android:textColor="@android:color/white" />
+
+            <ImageView
+                android:id="@+id/minus_interval"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="0.3"
+                android:contentDescription="@string/minus"
+                android:src="@drawable/ic_baseline_remove" />
+
+            <TextView
+                android:id="@+id/interval_value"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.4"
+                android:gravity="center"
+                android:padding="4dp"
+                android:text="500ms"
+                android:textColor="@android:color/white" />
+
+            <ImageView
+                android:id="@+id/plus_interval"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="0.3"
+                android:contentDescription="@string/plus"
+                android:src="@drawable/ic_baseline_add" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="0.2" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/single_person_switch"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1.2"
+                android:checked="true"
+                android:text="Single Only"
+                android:textColor="@android:color/white" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:text="Person ID:"
+                android:textColor="@android:color/white" />
+
+            <EditText
+                android:id="@+id/person_id_input"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:hint="e.g. ysy"
+                android:inputType="text"
+                android:maxLines="1"
+                android:textColor="@android:color/white"
+                android:textColorHint="#808080" />
+
+            <Button
+                android:id="@+id/btn_start"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/person_crop_start" />
+
+            <Button
+                android:id="@+id/btn_stop"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:enabled="false"
+                android:text="@string/person_crop_stop" />
+        </LinearLayout>
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
