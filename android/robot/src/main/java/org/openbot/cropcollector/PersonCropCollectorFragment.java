@@ -121,6 +121,22 @@ public class PersonCropCollectorFragment extends CameraFragment {
     binding.btnStart.setEnabled(true);
     binding.btnStop.setEnabled(false);
 
+    binding.intervalValue.setText(config.intervalMs + "ms");
+    binding.minusInterval.setOnClickListener(
+        v -> {
+          if (config.intervalMs <= 100) return;
+          config.intervalMs -= 100;
+          binding.intervalValue.setText(config.intervalMs + "ms");
+        });
+    binding.plusInterval.setOnClickListener(
+        v -> {
+          if (config.intervalMs >= 2000) return;
+          config.intervalMs += 100;
+          binding.intervalValue.setText(config.intervalMs + "ms");
+        });
+    binding.singlePersonSwitch.setOnCheckedChangeListener(
+        (buttonView, isChecked) -> config.singlePersonOnly = isChecked);
+
     binding.btnStart.setOnClickListener(v -> startCapture());
     binding.btnStop.setOnClickListener(v -> stopCapture());
   }
@@ -150,6 +166,9 @@ public class PersonCropCollectorFragment extends CameraFragment {
     binding.btnStop.setEnabled(true);
     binding.personIdInput.setEnabled(false);
     binding.modelSpinner.setEnabled(false);
+    binding.minusInterval.setEnabled(false);
+    binding.plusInterval.setEnabled(false);
+    binding.singlePersonSwitch.setEnabled(false);
     binding.statusText.setText("采集中: " + currentSession.sessionId);
   }
 
@@ -161,13 +180,17 @@ public class PersonCropCollectorFragment extends CameraFragment {
     }
     int saved = currentSession != null ? currentSession.savedCount : 0;
     int skipped = currentSession != null ? currentSession.skippedCount : 0;
+    String path = currentSession != null ? currentSession.sessionDir.getAbsolutePath() : "";
 
     binding.btnStart.setEnabled(true);
     binding.btnStop.setEnabled(false);
     binding.personIdInput.setEnabled(true);
     binding.modelSpinner.setEnabled(true);
+    binding.minusInterval.setEnabled(true);
+    binding.plusInterval.setEnabled(true);
+    binding.singlePersonSwitch.setEnabled(true);
     binding.statusText.setText(
-        String.format(Locale.US, "已停止: saved=%d skipped=%d", saved, skipped));
+        String.format(Locale.US, "已停止: saved=%d skipped=%d\n%s", saved, skipped, path));
   }
 
   protected void onInferenceConfigurationChanged() {
