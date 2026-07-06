@@ -57,6 +57,12 @@ public class PersonCropCollectorFragment extends CameraFragment {
   private long lastProcessingTimeMs = -1;
   private long frameNum = 0;
 
+  private final PersonCropCaptureConfig config = new PersonCropCaptureConfig();
+  private PersonCropSession currentSession = null;
+  private PersonCropSaver saver = null;
+  private boolean captureEnabled = false;
+  private long lastSaveTimeMs = 0;
+
   private final List<RectF> drawBoxes = new ArrayList<>();
   private int drawFrameWidth = 0;
   private int drawFrameHeight = 0;
@@ -114,6 +120,54 @@ public class PersonCropCollectorFragment extends CameraFragment {
     binding.statusText.setText(getString(R.string.person_crop_idle));
     binding.btnStart.setEnabled(true);
     binding.btnStop.setEnabled(false);
+
+    binding.btnStart.setOnClickListener(v -> startCapture());
+    binding.btnStop.setOnClickListener(v -> stopCapture());
+  }
+
+  private void startCapture() {
+    String personId = binding.personIdInput.getText().toString().trim();
+    if (personId.isEmpty()) {
+      Toast.makeText(requireContext(), "请输入 Person ID", Toast.LENGTH_SHORT).show();
+      return;
+    }
+
+    config.personId = personId;
+    config.minConfidence = minConfidence;
+
+    currentSession = new PersonCropSession(requireContext(), personId);
+    currentSession.initMetadataCsv();
+    currentSession.writeSessionInfo(config);
+
+    if (saver != null) {
+      saver.shutdown();
+    }
+    saver = new PersonCropSaver();
+    captureEnabled = true;
+    lastSaveTimeMs = 0;
+
+    binding.btnStart.setEnabled(false);
+    binding.btnStop.setEnabled(true);
+    binding.personIdInput.setEnabled(false);
+    binding.modelSpinner.setEnabled(false);
+    binding.statusText.setText("采集中: " + currentSession.sessionId);
+  }
+
+  private void stopCapture() {
+    captureEnabled = false;
+    if (saver != null) {
+      saver.shutdown();
+      saver = null;
+    }
+    int saved = currentSession != null ? currentSession.savedCount : 0;
+    int skipped = currentSession != null ? currentSession.skippedCount : 0;
+
+    binding.btnStart.setEnabled(true);
+    binding.btnStop.setEnabled(false);
+    binding.personIdInput.setEnabled(true);
+    binding.modelSpinner.setEnabled(true);
+    binding.statusText.setText(
+        String.format(Locale.US, "已停止: saved=%d skipped=%d", saved, skipped));
   }
 
   protected void onInferenceConfigurationChanged() {
@@ -187,6 +241,9 @@ public class PersonCropCollectorFragment extends CameraFragment {
 
   @Override
   public synchronized void onPause() {
+    if (captureEnabled) {
+      stopCapture();
+    }
     handlerThread.quitSafely();
     try {
       handlerThread.join();
@@ -252,6 +309,9 @@ public class PersonCropCollectorFragment extends CameraFragment {
             int frameH = getMaxAnalyseImageSize().getHeight();
             updateDrawState(mappedRecognitions, frameW, frameH, sensorOrientation);
             float fps = lastProcessingTimeMs > 0 ? 1000f / lastProcessingTimeMs : 0f;
+
+            handleCropCapture(workingFrame, mappedRecognitions);
+
             updateDebugInfo(mappedRecognitions.size(), fps);
             binding.trackingOverlay.postInvalidate();
           }
@@ -262,6 +322,44 @@ public class PersonCropCollectorFragment extends CameraFragment {
   private void updateCropImageInfo() {
     sensorOrientation = 90 - ImageUtils.getScreenOrientation(requireActivity());
     recreateNetwork(getModel(), getDevice(), getNumThreads());
+  }
+
+  private void handleCropCapture(Bitmap workingFrame, List<Detector.Recognition> persons) {
+    if (!captureEnabled || currentSession == null || saver == null) return;
+
+    long now = System.currentTimeMillis();
+    if (now - lastSaveTimeMs < config.intervalMs) return;
+
+    if (currentSession.savedCount >= config.maxCrops) {
+      requireActivity().runOnUiThread(() -> stopCapture());
+      return;
+    }
+
+    if (persons.isEmpty()) {
+      currentSession.skippedCount++;
+      return;
+    }
+
+    if (config.singlePersonOnly && persons.size() != 1) {
+      currentSession.skippedCount++;
+      return;
+    }
+
+    int numPersons = persons.size();
+    if (config.singlePersonOnly) {
+      int cropId = currentSession.savedCount + 1;
+      currentSession.savedCount = cropId;
+      saver.saveCropAsync(
+          workingFrame, persons.get(0), 0, numPersons, currentSession, config, frameNum, cropId);
+    } else {
+      for (int i = 0; i < numPersons; i++) {
+        int cropId = currentSession.savedCount + 1;
+        currentSession.savedCount = cropId;
+        saver.saveCropAsync(
+            workingFrame, persons.get(i), i, numPersons, currentSession, config, frameNum, cropId);
+      }
+    }
+    lastSaveTimeMs = now;
   }
 
   private synchronized void updateDrawState(
@@ -307,11 +405,15 @@ public class PersonCropCollectorFragment extends CameraFragment {
 
   private void updateDebugInfo(int persons, float fps) {
     if (binding == null) return;
+    int saved = currentSession != null ? currentSession.savedCount : 0;
+    int skipped = currentSession != null ? currentSession.skippedCount : 0;
     String info =
         String.format(
             Locale.US,
-            "persons=%d\nsaved=0\nskipped=0\nfps=%.1f",
+            "persons=%d\nsaved=%d\nskipped=%d\nfps=%.1f",
             persons,
+            saved,
+            skipped,
             fps);
     requireActivity().runOnUiThread(() -> binding.debugInfo.setText(info));
   }
