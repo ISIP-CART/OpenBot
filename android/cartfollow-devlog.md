@@ -205,7 +205,7 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 - [x] `FollowStateMachine.FrameResult` 透传 distanceEstimate
 - [x] Human Cart Simulator 显示 dist_state / hScale / aScale / bShift / distConf
 - [x] `HumanCommandInterpreter` 纳入 distance state
-- [ ] 0.8-1.2 m 目标距离标定验证（待实机/ Simulator 实测）
+- [x] 0.8-1.2 m 目标距离标定验证（初步测试基本通过，大多数情况下可以把距离保持为初始化时的距离。bShift在人远离的时候会向更负的方向变化，符合预期。）
 
 **不在 Phase 2 范围**：`vehicle.setControl()` 接通（阶段6）、ReID 增强（阶段3）、障碍处理（阶段5）
 
