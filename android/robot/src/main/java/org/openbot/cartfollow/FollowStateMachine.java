@@ -19,6 +19,7 @@ public class FollowStateMachine {
     public final boolean tooClose;
     public final Bitmap snapshot;
     public final int countdownSec;
+    public ImageSetpointDistanceEstimator.DistanceEstimate distanceEstimate;
 
     public FrameResult(
         FollowState state,
@@ -126,7 +127,7 @@ public class FollowStateMachine {
         }
         captureCount++;
         if (captureCount >= CAPTURE_FRAMES) {
-          memory.captureFromBitmap(frame, cand.getLocation());
+          memory.captureFromBitmap(frame, cand.getLocation(), frameW, frameH, sensorOrientation);
           snapshot = cropSnapshot(frame, cand.getLocation());
           captureCount = 0;
           state = FollowState.LOCKED_PENDING_CONFIRM;
@@ -181,9 +182,13 @@ public class FollowStateMachine {
           memory.updateDynamic(m.best);
           lostCount = 0;
           ControlGenerator.Result res =
-              controlGenerator.generateFromTarget(m.best, safePersons, frameW, frameH, sensorOrientation);
-          return new FrameResult(
-              FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
+              controlGenerator.generateFromTarget(
+                  m.best, safePersons, frameW, frameH, sensorOrientation, memory);
+          FrameResult fr =
+              new FrameResult(
+                  FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
+          fr.distanceEstimate = res.distanceEstimate;
+          return fr;
         }
         lostCount++;
         if (lostCount >= FOLLOW_LOST_M) {
@@ -201,9 +206,13 @@ public class FollowStateMachine {
           lostCount = 0;
           memory.updateDynamic(m.best);
           ControlGenerator.Result res =
-              controlGenerator.generateFromTarget(m.best, safePersons, frameW, frameH, sensorOrientation);
-          return new FrameResult(
-              FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
+              controlGenerator.generateFromTarget(
+                  m.best, safePersons, frameW, frameH, sensorOrientation, memory);
+          FrameResult fr =
+              new FrameResult(
+                  FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
+          fr.distanceEstimate = res.distanceEstimate;
+          return fr;
         }
         if (now - stateEnterTime >= LOST_TO_SEARCH_MS) {
           state = FollowState.SEARCH;
@@ -220,9 +229,13 @@ public class FollowStateMachine {
           lostCount = 0;
           memory.updateDynamic(m.best);
           ControlGenerator.Result res =
-              controlGenerator.generateFromTarget(m.best, safePersons, frameW, frameH, sensorOrientation);
-          return new FrameResult(
-              FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
+              controlGenerator.generateFromTarget(
+                  m.best, safePersons, frameW, frameH, sensorOrientation, memory);
+          FrameResult fr =
+              new FrameResult(
+                  FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
+          fr.distanceEstimate = res.distanceEstimate;
+          return fr;
         }
         if (now - stateEnterTime >= SEARCH_TIMEOUT_MS) {
           state = FollowState.STOP;

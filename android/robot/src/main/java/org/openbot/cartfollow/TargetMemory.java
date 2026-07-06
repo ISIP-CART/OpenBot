@@ -16,6 +16,10 @@ public class TargetMemory {
   private float[] upperColorHist;
   private float[] lowerColorHist;
 
+  private float desiredHeightRatio;
+  private float desiredAreaRatio;
+  private float desiredBottomRatio;
+
   private RectF lastBbox;
   private float lastCenterX;
   private float lastCenterY;
@@ -23,6 +27,11 @@ public class TargetMemory {
   private long lastSeenTimeMs;
 
   public void captureFromBitmap(Bitmap bitmap, RectF bbox) {
+    captureFromBitmap(bitmap, bbox, 0, 0, 0);
+  }
+
+  public void captureFromBitmap(
+      Bitmap bitmap, RectF bbox, int frameW, int frameH, int sensorOrientation) {
     confirmedBbox = new RectF(bbox);
     confirmedArea = bbox.width() * bbox.height();
     confirmedAspectRatio = bbox.width() / Math.max(1f, bbox.height());
@@ -33,6 +42,42 @@ public class TargetMemory {
     lastCenterY = bbox.centerY();
     lastArea = confirmedArea;
     lastSeenTimeMs = System.currentTimeMillis();
+    computeDistanceSetpoint(bbox, frameW, frameH, sensorOrientation);
+  }
+
+  private void computeDistanceSetpoint(
+      RectF bbox, int frameW, int frameH, int sensorOrientation) {
+    if (frameW <= 0 || frameH <= 0 || bbox == null) {
+      desiredHeightRatio = 0f;
+      desiredAreaRatio = 0f;
+      desiredBottomRatio = 0f;
+      return;
+    }
+    boolean rotated = sensorOrientation % 180 == 90;
+    float imgWidth = rotated ? frameH : frameW;
+    float imgHeight = rotated ? frameW : frameH;
+    if (imgWidth <= 0 || imgHeight <= 0) {
+      desiredHeightRatio = 0f;
+      desiredAreaRatio = 0f;
+      desiredBottomRatio = 0f;
+      return;
+    }
+    float boxHeight = rotated ? bbox.width() : bbox.height();
+    float boxWidth = rotated ? bbox.height() : bbox.width();
+    float boxBottom = rotated ? bbox.right : bbox.bottom;
+    desiredHeightRatio = boxHeight / imgHeight;
+    desiredAreaRatio = (boxWidth * boxHeight) / (imgWidth * imgHeight);
+    desiredBottomRatio = boxBottom / imgHeight;
+  }
+
+  public boolean hasDistanceSetpoint() {
+    return desiredHeightRatio > 0f && desiredAreaRatio > 0f;
+  }
+
+  public ImageSetpointDistanceEstimator.Setpoint getDistanceSetpoint() {
+    if (!hasDistanceSetpoint()) return null;
+    return new ImageSetpointDistanceEstimator.Setpoint(
+        desiredHeightRatio, desiredAreaRatio, desiredBottomRatio);
   }
 
   public void updateDynamic(Recognition r) {
@@ -51,6 +96,9 @@ public class TargetMemory {
     confirmedAspectRatio = 0f;
     upperColorHist = null;
     lowerColorHist = null;
+    desiredHeightRatio = 0f;
+    desiredAreaRatio = 0f;
+    desiredBottomRatio = 0f;
     lastBbox = null;
     lastCenterX = 0f;
     lastCenterY = 0f;
