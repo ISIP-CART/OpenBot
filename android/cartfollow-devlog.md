@@ -2,8 +2,8 @@
 
 > 所属项目：自主跟随购物车原型
 > 代码位置：`dev/OpenBot/android/robot/src/main/java/org/openbot/cartfollow/`
-> 开发分支：`feature/human-cart-simulator`（Phase 1）/ `feature/distance-control`（Phase 2 起）
-> 最后更新：2026-07-06
+> 开发分支：`feature/human-cart-simulator`（Phase 1）/ `feature/distance-control`（Phase 2）/ `feature/person-crop-collector`（Phase 3 起）
+> 最后更新：2026-07-07
 
 ---
 
@@ -36,6 +36,20 @@ Human Cart Simulator 是购物车跟随功能的上位机核心模块，在 Open
 | `nav_graph.xml` | 注册 `cartSimFragment` 导航目标 |
 | `strings.xml` | 新增 `cart_simulator` / `cart_sim_start` / `cart_sim_idle` 字符串 |
 
+### Person Crop Collector（Phase 3 数据闭环入口）
+
+`Person Crop Collector` 是 ReID 接入前的真实检测框数据采集工具页，代码位置为 `dev/OpenBot/android/robot/src/main/java/org/openbot/cropcollector/`。
+
+| 文件 | 作用 |
+|------|------|
+| `PersonCropCollectorFragment.java` | 复用 OpenBot `Detector`，实时显示 person 检测框，并按 Person ID 启停采集 session |
+| `PersonCropSession.java` | 为每次采集创建 `session_id`、`session_info.json`、`metadata.csv` 与 `crops/` 输出目录 |
+| `PersonCropSaver.java` | 异步保存带 padding 的 person crop，按 `sensorOrientation` 旋转为正向图，并追加元数据 |
+| `PersonCropCaptureConfig.java` | 管理采样间隔、置信度阈值、单人采集、padding、最大 crop 数和 JPEG 质量 |
+| `fragment_person_crop_collector.xml` | 采集页 UI：模型选择、置信度、采样间隔、单人模式、Person ID、开始 / 停止按钮 |
+
+当前输出路径位于 App 外部图片目录下的 `cartfollow_crops/<person_id>_<timestamp>/`，导出到 PC 后再由 `tools/reid_pc_test/prepare_openbot_crops_dataset.py` 整理为 `images_openbot_clean/`。
+
 ---
 
 ## 2. 当前实现状态
@@ -67,8 +81,31 @@ Human Cart Simulator 是购物车跟随功能的上位机核心模块，在 Open
 | 倒计时显示 | 已完成 | READY_TO_FOLLOW 时显示剩余秒数 |
 | 调试信息面板 | 已完成 | 显示 state / forward / turn / left / right / persons / fps / dist / hScale / aScale / bShift / distConf |
 | 导航集成 | 已完成 | 已注册到主菜单 "Cart Simulator" 入口 |
+| **Person Crop Collector** | 已完成（Phase 3 前置） | 已注册到主菜单，可采集真实 OpenBot person bbox crop、`session_info.json` 与 `metadata.csv` |
+| **真实 crop 数据 PC 端 ReID 复测** | 已完成首轮 | 基于 `images_openbot_clean`、`osnet_x0_25_market1501.pth`、`diverse gallery` 完成 pairwise / gallery-probe / target-follow 模拟 |
 
-### 2.2 核心控制算法（Phase 2 后）
+### 2.2 Phase 3 首轮 ReID 实验结果（2026-07-06）
+
+数据集：`tools/reid_pc_test/images_openbot_clean`，共 3 个身份、209 张真实 OpenBot 检测框 crop。
+
+模型：`osnet_x0_25` + `weights/osnet_x0_25_market1501.pth`，CPU 推理，embedding 维度 512。
+
+关键结论：
+
+- Pairwise：同一人均值 `0.709`，不同人均值 `0.620`，均值差距 `0.089`，Top-1 最近邻身份正确率 `0.990`。
+- Gallery-Probe：`gallery-k=8 + diverse` 强制识别准确率 `0.876`，优于 `gallery-k=5` 的 `0.840`。
+- Target-follow 模拟：`gallery-k=8` 时目标存在场景强制选择目标准确率 `0.843`；`margin>=0.05` 时 accepted accuracy `0.957`，`margin>=0.08` 时 `0.986`。
+- 目标缺席场景风险仍高：`gallery-k=8` 下 `margin>=0.05` 的 false accept rate 仍为 `0.457`，`margin>=0.10` 仍为 `0.184`。
+
+工程判断：
+
+```text
+当前 ReID 主线暂定为 osnet_x0_25 + diverse confirmedGallery(k=8)。
+ReID margin 可作为身份置信证据，但不能单独恢复 FOLLOW。
+后续必须与位置连续性、bbox 尺寸、运动趋势、连续多帧稳定性和状态机融合。
+```
+
+### 2.3 核心控制算法（Phase 2 后）
 
 ```
 输入：匹配目标 bbox + 画面尺寸 + 传感器角度 + TargetMemory(setpoint)
@@ -136,7 +173,7 @@ Human Cart Simulator 是购物车跟随功能的上位机核心模块，在 Open
 | 功能 | 优先级 | 说明 |
 |------|--------|------|
 | **`vehicle.setControl()` 集成** | 中（阶段6） | 当前 Control 仅显示在 UI 上，未实际发送给底盘。硬件联调阶段在 `processFrame()` 中调用 `vehicle.setControl()` |
-| **目标重锁定增强** | 中 | 当前 LOST/SEARCH 恢复复用 TargetMatcher，未加入 ReID 强确认。阶段3 处理 |
+| **目标重锁定增强** | 高 | 当前 LOST/SEARCH 恢复复用 TargetMatcher，尚未接入 Android 端 ReID embedding 与多线索融合。阶段3 继续处理 |
 | **参数持久化** | 低 | 当前调参仅内存生效，重启恢复默认 |
 | **参数 UI 面板** | 低 | K_TURN / MAX_FORWARD / 阈值等参数需通过代码修改，没有 UI 界面 |
 | **bottomShift 参与判态** | 低 | 当前 bottomShift 仅用于显示，未参与距离状态判断。待 90° 旋转下方向实测验证后决定是否纳入 |
@@ -211,10 +248,11 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 
 ### Phase 3：真实检测框数据闭环 + ReID
 
-- [ ] 从 OpenBot Android 导出真实 person bbox crop
-- [ ] PC 端验证 confirmedGallery / reid_score / reid_margin
+- [x] 新增 Person Crop Collector，从 OpenBot Android 导出真实 person bbox crop
+- [x] PC 端验证 confirmedGallery / reid_score / reid_margin（首轮基于 `osnet_x0_25 + diverse gallery-k=8`）
 - [ ] Android 端部署 osnet_x0_25（ONNX Runtime Mobile 主线）
-- [ ] 多人/遮挡/重现场景验证
+- [ ] 将 ReID 输出接入 `TargetMemory / TargetMatcher / FollowStateMachine`
+- [ ] 多人/遮挡/重现场景验证，并特别验证目标缺席时的 false accept 抑制
 
 ### Phase 4：单目深度辅助
 
@@ -244,6 +282,12 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 | `173ef96` | 2026-07-06 | Add DistanceState and ImageSetpointDistanceEstimator for image-based visual servoing |
 | `66bbf12` | 2026-07-06 | Calibrate distance setpoint in TargetMemory and refactor ControlGenerator to DistanceState |
 | `c880025` | 2026-07-06 | Display distance state and scales in Human Cart Simulator |
+| `80fa505` | 2026-07-06 | Add Person Crop Collector entry skeleton |
+| `290282c` | 2026-07-06 | Show person detections in crop collector |
+| `9e3c7c4` | 2026-07-06 | Save detected person crops with metadata |
+| `6d9aa5f` | 2026-07-06 | Add capture controls and status panel |
+| `765eb82` | 2026-07-06 | Put Person ID input on its own row for tap accessibility |
+| `771345e` | 2026-07-06 | Rotate crop by sensorOrientation before saving to disk |
 
 ---
 
@@ -254,3 +298,6 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 - 打开 Start 开关开始检测，关闭开关回到 IDLE
 - 调试信息面板显示实时 state / forward / turn / persons / fps
 - 中文指令文本仅供调试参考，实际不会发送给底盘
+- 主菜单 → "Person Crop Collector" 进入 ReID 数据采集页
+- 输入 Person ID，保持 `Single Only` 打开，点击 Start Session 后采集真实 person crop
+- 采集目录导出到 PC 后，用 `tools/reid_pc_test/prepare_openbot_crops_dataset.py` 整理为 `images_openbot_clean/`
