@@ -207,4 +207,7 @@
     <string name="front_leds">Front LEDs</string>
     <string name="usb">USB</string>
     <string name="cancel">Cancel</string>
+    <string name="cart_simulator">Cart Simulator</string>
+    <string name="cart_sim_start">Start</string>
+    <string name="cart_sim_idle">待命</string>
 </resources>
