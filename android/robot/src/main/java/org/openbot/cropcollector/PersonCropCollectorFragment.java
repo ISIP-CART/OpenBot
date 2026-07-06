@@ -373,13 +373,13 @@ public class PersonCropCollectorFragment extends CameraFragment {
       int cropId = currentSession.savedCount + 1;
       currentSession.savedCount = cropId;
       saver.saveCropAsync(
-          workingFrame, persons.get(0), 0, numPersons, currentSession, config, frameNum, cropId);
+          workingFrame, persons.get(0), 0, numPersons, currentSession, config, frameNum, cropId, sensorOrientation);
     } else {
       for (int i = 0; i < numPersons; i++) {
         int cropId = currentSession.savedCount + 1;
         currentSession.savedCount = cropId;
         saver.saveCropAsync(
-            workingFrame, persons.get(i), i, numPersons, currentSession, config, frameNum, cropId);
+            workingFrame, persons.get(i), i, numPersons, currentSession, config, frameNum, cropId, sensorOrientation);
       }
     }
     lastSaveTimeMs = now;

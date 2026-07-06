@@ -1,6 +1,7 @@
 package org.openbot.cropcollector;
 
 import android.graphics.Bitmap;
+import android.graphics.Matrix;
 import android.graphics.RectF;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -24,7 +25,8 @@ public class PersonCropSaver {
       PersonCropSession session,
       PersonCropCaptureConfig config,
       long frameNum,
-      int cropId) {
+      int cropId,
+      int sensorOrientation) {
     RectF bbox = person.getLocation();
     if (bbox == null || frame == null) {
       session.skippedCount++;
@@ -44,12 +46,22 @@ public class PersonCropSaver {
       return;
     }
 
-    final Bitmap crop;
+    final Bitmap rawCrop;
     try {
-      crop = Bitmap.createBitmap(frame, left, top, w, h);
+      rawCrop = Bitmap.createBitmap(frame, left, top, w, h);
     } catch (Exception e) {
       session.skippedCount++;
       return;
+    }
+
+    final Bitmap uprightCrop;
+    if (sensorOrientation % 360 != 0) {
+      Matrix matrix = new Matrix();
+      matrix.postRotate(sensorOrientation);
+      uprightCrop = Bitmap.createBitmap(rawCrop, 0, 0, rawCrop.getWidth(), rawCrop.getHeight(), matrix, true);
+      rawCrop.recycle();
+    } else {
+      uprightCrop = rawCrop;
     }
 
     final int imgW = frame.getWidth();
@@ -65,11 +77,11 @@ public class PersonCropSaver {
           File cropFile = new File(session.cropsDir, filename);
 
           try (FileOutputStream fos = new FileOutputStream(cropFile)) {
-            crop.compress(Bitmap.CompressFormat.JPEG, config.jpegQuality, fos);
+            uprightCrop.compress(Bitmap.CompressFormat.JPEG, config.jpegQuality, fos);
           } catch (IOException e) {
             Timber.e(e, "Failed to save crop");
           } finally {
-            crop.recycle();
+            uprightCrop.recycle();
           }
 
           appendMetadataCsv(
