@@ -288,10 +288,152 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 | `6d9aa5f` | 2026-07-06 | Add capture controls and status panel |
 | `765eb82` | 2026-07-06 | Put Person ID input on its own row for tap accessibility |
 | `771345e` | 2026-07-06 | Rotate crop by sensorOrientation before saving to disk |
+| pending | 2026-07-07 | Add PersonSequenceCollector for continuous sequence data collection |
 
 ---
 
-## 7. 调试提示
+## 7. Person Sequence Collector（Phase 3 时序数据采集）
+
+> 更新日期：2026-07-07  
+> 代码位置：`dev/OpenBot/android/robot/src/main/java/org/openbot/sequencecollector/`  
+> 目的：为 PC 端 chronological replay / 状态机回放采集连续时序事实数据。  
+> 当前状态：已实现、已构建通过、已安装到手机，并完成两条真实 sequence 采集。
+
+### 7.1 模块定位
+
+`PersonSequenceCollector` 是独立于 `PersonCropCollector` 的采集工具。它不做 ReID 推理，不控制小车，不写入 `FOLLOW / LOST / REACQUIRE / STOP` 等状态标签，只记录摄像头检测到的事实：
+
+```text
+每个采样帧是否有人；
+每个采样帧有几个人；
+每个检测框的 bbox / confidence / crop_path；
+人工标记的 target_left / target_return / occlusion / distractor 事件。
+```
+
+这样 PC 端可以用同一份时序数据复现目标离开、遮挡、返回、干扰者进入等场景，而不是继续依赖随机抽样 rows。
+
+### 7.2 新增文件
+
+| 文件 | 作用 |
+|------|------|
+| `sequencecollector/PersonSequenceCollectorFragment.java` | 独立 CameraFragment 页面，复用 OpenBot Detector 检测 person，写入连续时序日志。 |
+| `sequencecollector/PersonSequenceCaptureConfig.java` | 管理 frame log / crop / overlay 采样间隔、置信度、是否保存 crop 等配置。 |
+| `sequencecollector/PersonSequenceSession.java` | 创建 `cartfollow_sequences/<session_id>/`，初始化 CSV 和 `session_info.json`。 |
+| `sequencecollector/PersonSequenceSaver.java` | 单线程异步写 `frame_log.csv`、`detections.csv`、`events.csv` 和可选 crops。 |
+| `res/layout/fragment_person_sequence_collector.xml` | Sequence 采集 UI。 |
+
+入口集成：
+
+| 文件 | 修改内容 |
+|------|----------|
+| `FeatureList.java` | 新增 `PERSON_SEQUENCE_COLLECTOR` 主菜单项。 |
+| `MainFragment.java` | 新增跳转到 `personSequenceCollectorFragment`。 |
+| `nav_graph.xml` | 注册 `personSequenceCollectorFragment`。 |
+| `strings.xml` | 新增 Sequence Collector 标题、Start/Stop、idle 文案。 |
+
+### 7.3 输出目录与文件
+
+输出目录位于 App 外部图片目录：
+
+```text
+/sdcard/Android/data/org.openbot/files/Pictures/cartfollow_sequences/
+└── <person_id>_seq_<yyyyMMdd_HHmmss>/
+    ├── frame_log.csv
+    ├── detections.csv
+    ├── events.csv
+    ├── session_info.json
+    ├── crops/
+    └── overlays/
+```
+
+CSV 字段：
+
+```text
+frame_log.csv:
+session_id,frame_id,timestamp_ms,elapsed_ms,image_width,image_height,num_persons,raw_frame_path,overlay_path,event_tag,note
+
+detections.csv:
+session_id,frame_id,det_id,timestamp_ms,confidence,bbox_left,bbox_top,bbox_right,bbox_bottom,bbox_width,bbox_height,bbox_area_ratio,center_x,center_y,edge_touch,crop_path
+
+events.csv:
+session_id,timestamp_ms,frame_id,event_type,note
+```
+
+当前默认参数：
+
+| 参数 | 默认值 |
+|------|--------|
+| `frameLogIntervalMs` | 200 ms |
+| `cropIntervalMs` | 500 ms |
+| `overlayIntervalMs` | 1000 ms |
+| `minConfidence` | 0.5 |
+| `saveCrops` | true |
+| `saveOverlays` | false |
+| `jpegQuality` | 90 |
+
+说明：`frameLogIntervalMs` 与 `cropIntervalMs` 可在页面中通过 +/- 控件调整。第二条 sequence `yrc2_seq_20260707_152237` 实测使用 `cropIntervalMs=300 ms`，用于提高 PC 端 ReID replay 的帧密度。
+
+### 7.4 当前验证状态
+
+已完成静态构建验证：
+
+```powershell
+$env:JAVA_HOME='D:\Java\jdk-17'
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过。默认 JDK 24 会触发 Android Gradle `jlink` 兼容问题，需使用本机 `D:\Java\jdk-17` 构建。
+
+已完成真机验证：
+
+```text
+主菜单能看到 Person Sequence Collector；
+进入页面后能显示 person bbox；
+Start 后创建 cartfollow_sequences/<session_id>/；
+无人帧写入 frame_log.csv，num_persons=0；
+多人帧在 detections.csv 写多行；
+事件按钮能追加 events.csv；
+Stop 后显示 frames / detections / crops / events 和导出路径；
+adb pull 后 PC sequence replay 可以读取并扩展使用。
+```
+
+已采集数据：
+
+| sequence | 说明 | PC 侧结论 |
+|----------|------|-----------|
+| `yrc_seq_20260707_140056` | 首条真实 sequence，包含目标离开、返回、干扰者、遮挡事件。 | 安全性成立，未出现错误恢复 FOLLOW；高 over-stop 主要来自终态 STOP 后尾段。 |
+| `yrc2_seq_20260707_152237` | 更结构化 sequence：正常跟随、目标离开、无人帧、返回、干扰者进入/离开、遮挡。 | 暴露“看到了目标但恢复条件太严”的问题；宽松恢复条件可避免 STOP，并保持 `wrong_recovery_count=0`。 |
+
+### 7.5 对 FollowStateMachine 的最新启发
+
+第二条 sequence 表明：目标返回后，系统经常能看到连续稳定 bbox 和中等偏高 ReID 分数，但如果恢复条件只接受很强的 `strong + strict` 连续证据，就会长期卡在 `IDENTITY_UNCERTAIN`，最后超时进入 `STOP`。
+
+后续 Android 状态机不应把 `STOP` 当成唯一安全动作，而应区分：
+
+```text
+motion_stop:
+  线速度为 0，不继续前进，但仍观察、原地搜索、尝试重捕获。
+
+hard STOP:
+  搜索失败、风险过高或安全异常后的终态停车，等待人工重新开始。
+```
+
+建议新增或细化状态：
+
+```text
+FOLLOW
+FOLLOW_CAUTION
+IDENTITY_UNCERTAIN
+LOCAL_SEARCH
+REACQUIRE_TARGET
+STOP
+```
+
+目标丢失时应先进入 `motion_stop + LOCAL_SEARCH`，根据最后 bbox 方向做原地低速搜索；目标返回后若连续多帧满足 `ReID + bbox + prediction` 稳定证据，再进入 `REACQUIRE_TARGET`，最后恢复 `FOLLOW`。只有搜索超时、干扰风险过高、障碍/急停/通信异常时才进入 hard `STOP`。
+
+---
+
+## 8. 调试提示
 
 - 使用 `/dev/OpenBot/android` 在 Android Studio 中打开工程
 - 主菜单 → "Cart Simulator" 进入本模块
@@ -301,3 +443,5 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 - 主菜单 → "Person Crop Collector" 进入 ReID 数据采集页
 - 输入 Person ID，保持 `Single Only` 打开，点击 Start Session 后采集真实 person crop
 - 采集目录导出到 PC 后，用 `tools/reid_pc_test/prepare_openbot_crops_dataset.py` 整理为 `images_openbot_clean/`
+- 主菜单 → "Person Sequence Collector" 进入连续时序采集页
+- Sequence 采集时事件按钮只需在事件开始/结束时各按一次，PC replay 会用容忍窗口处理人工反应延迟

@@ -214,4 +214,8 @@
     <string name="person_crop_start">Start Session</string>
     <string name="person_crop_stop">Stop Session</string>
     <string name="person_crop_idle">Ready to collect person crops</string>
+    <string name="person_sequence_collector">Person Sequence Collector</string>
+    <string name="person_sequence_start">Start Sequence</string>
+    <string name="person_sequence_stop">Stop Sequence</string>
+    <string name="person_sequence_idle">Ready to collect sequence data</string>
 </resources>
