@@ -19,7 +19,9 @@ public class FollowStateMachine {
     public final boolean tooClose;
     public final Bitmap snapshot;
     public final int countdownSec;
+    public float matchScore;
     public ImageSetpointDistanceEstimator.DistanceEstimate distanceEstimate;
+    public BehaviorDecisionResult behaviorDecision;
 
     public FrameResult(
         FollowState state,
@@ -40,6 +42,7 @@ public class FollowStateMachine {
       this.tooClose = tooClose;
       this.snapshot = snapshot;
       this.countdownSec = countdownSec;
+      this.matchScore = 0f;
     }
   }
 
@@ -159,8 +162,11 @@ public class FollowStateMachine {
           stateEnterTime = now;
           memory.updateDynamic(m.best);
         }
-        return new FrameResult(
-            state, new Control(0f, 0f), m.best, null, safePersons, m.matched, false, null, -1);
+        FrameResult fr =
+            new FrameResult(
+                state, new Control(0f, 0f), m.best, null, safePersons, m.matched, false, null, -1);
+        fr.matchScore = m.score;
+        return fr;
       }
 
       case READY_TO_FOLLOW: {
@@ -172,8 +178,19 @@ public class FollowStateMachine {
               FollowState.FOLLOW, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
         }
         TargetMatcher.MatchResult m = matcher.match(safePersons, frame, memory, frameW, frameH);
-        return new FrameResult(
-            FollowState.READY_TO_FOLLOW, new Control(0f, 0f), m.best, null, safePersons, m.matched, false, null, Math.max(0, cd));
+        FrameResult fr =
+            new FrameResult(
+                FollowState.READY_TO_FOLLOW,
+                new Control(0f, 0f),
+                m.best,
+                null,
+                safePersons,
+                m.matched,
+                false,
+                null,
+                Math.max(0, cd));
+        fr.matchScore = m.score;
+        return fr;
       }
 
       case FOLLOW: {
@@ -187,6 +204,7 @@ public class FollowStateMachine {
           FrameResult fr =
               new FrameResult(
                   FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
+          fr.matchScore = m.score;
           fr.distanceEstimate = res.distanceEstimate;
           return fr;
         }
@@ -195,8 +213,11 @@ public class FollowStateMachine {
           state = FollowState.LOST;
           stateEnterTime = now;
         }
-        return new FrameResult(
-            state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
+        FrameResult fr =
+            new FrameResult(
+                state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
+        fr.matchScore = m.score;
+        return fr;
       }
 
       case LOST: {
@@ -211,6 +232,7 @@ public class FollowStateMachine {
           FrameResult fr =
               new FrameResult(
                   FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
+          fr.matchScore = m.score;
           fr.distanceEstimate = res.distanceEstimate;
           return fr;
         }
@@ -218,8 +240,11 @@ public class FollowStateMachine {
           state = FollowState.SEARCH;
           stateEnterTime = now;
         }
-        return new FrameResult(
-            state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
+        FrameResult fr =
+            new FrameResult(
+                state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
+        fr.matchScore = m.score;
+        return fr;
       }
 
       case SEARCH: {
@@ -234,14 +259,18 @@ public class FollowStateMachine {
           FrameResult fr =
               new FrameResult(
                   FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
+          fr.matchScore = m.score;
           fr.distanceEstimate = res.distanceEstimate;
           return fr;
         }
         if (now - stateEnterTime >= SEARCH_TIMEOUT_MS) {
           state = FollowState.STOP;
         }
-        return new FrameResult(
-            state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
+        FrameResult fr =
+            new FrameResult(
+                state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
+        fr.matchScore = m.score;
+        return fr;
       }
 
       case STOP:

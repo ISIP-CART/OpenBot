@@ -68,6 +68,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private final TargetMatcher matcher = new TargetMatcher();
   private final FollowStateMachine stateMachine =
       new FollowStateMachine(matcher, controlGenerator);
+  private final ActionArbitrator actionArbitrator = new ActionArbitrator();
 
   private final List<DrawBox> drawBoxes = new ArrayList<>();
   private int drawFrameWidth = 0;
@@ -157,7 +158,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private void resetUiToIdle() {
     updateCommandText(getString(R.string.cart_sim_idle));
-    updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f, null);
+    updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f, null, null);
     if (binding != null) {
       binding.confirmPanel.setVisibility(View.GONE);
       binding.countdownText.setVisibility(View.GONE);
@@ -302,11 +303,13 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             FollowStateMachine.FrameResult fr =
                 stateMachine.onFrame(
                     mappedRecognitions, workingFrame, frameW, frameH, sensorOrientation);
+            fr.behaviorDecision = decideBehavior(fr, frameW, frameH);
 
             updateDrawState(fr, frameW, frameH, sensorOrientation);
             updateCommandText(commandForState(fr));
             float fps = lastProcessingTimeMs > 0 ? 1000f / lastProcessingTimeMs : 0f;
-            updateDebugInfo(fr.state, fr.control, fr.persons.size(), fps, fr.distanceEstimate);
+            updateDebugInfo(
+                fr.state, fr.control, fr.persons.size(), fps, fr.distanceEstimate, fr.behaviorDecision);
             updateUiForState(fr);
             binding.trackingOverlay.postInvalidate();
           }
@@ -389,6 +392,26 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   }
 
   private String commandForState(FollowStateMachine.FrameResult fr) {
+    if (fr.behaviorDecision != null) {
+      switch (fr.behaviorDecision.selectedAction) {
+        case LOCAL_SEARCH_LEFT:
+          return HumanCommandInterpreter.CMD_TURN_LEFT;
+        case LOCAL_SEARCH_RIGHT:
+          return HumanCommandInterpreter.CMD_TURN_RIGHT;
+        case BLOCKED_WAIT:
+          return "前方受阻，请停止等待";
+        case MOTION_STOP:
+        case HARD_STOP:
+        case EMERGENCY_STOP:
+          return HumanCommandInterpreter.CMD_STOP;
+        case REACQUIRE_HOLD:
+          return "疑似目标，请停止确认";
+        case FOLLOW_SLOW:
+        case FOLLOW_CAUTION:
+        default:
+          break;
+      }
+    }
     switch (fr.state) {
       case IDLE:
         return "待命，打开 Start 开始采集目标";
@@ -448,7 +471,8 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       Control control,
       int persons,
       float fps,
-      ImageSetpointDistanceEstimator.DistanceEstimate dist) {
+      ImageSetpointDistanceEstimator.DistanceEstimate dist,
+      BehaviorDecisionResult behaviorDecision) {
     if (binding == null) return;
     float forward = (control.getLeft() + control.getRight()) / 2f;
     float turn = (control.getRight() - control.getLeft()) / 2f;
@@ -466,10 +490,35 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     } else {
       distLine = "dist=-";
     }
+    String behaviorLine;
+    if (behaviorDecision != null) {
+      behaviorLine =
+          String.format(
+              Locale.US,
+              "action=%s\nactionReason=%s\nsafetyBlock=%s\nactionConf=%.2f",
+              behaviorDecision.selectedAction.name(),
+              behaviorDecision.actionReason,
+              behaviorDecision.safetyBlockReason == null ? "-" : behaviorDecision.safetyBlockReason,
+              behaviorDecision.confidence);
+      if (behaviorDecision.traversabilityEvidence != null) {
+        TraversabilityEvidence trav = behaviorDecision.traversabilityEvidence;
+        behaviorLine +=
+            String.format(
+                Locale.US,
+                "\ncenterBlocked=%s\nfreeLCR=%.2f/%.2f/%.2f\ntravReason=%s",
+                trav.centerBlocked,
+                trav.leftFreeScore,
+                trav.centerFreeScore,
+                trav.rightFreeScore,
+                trav.reason);
+      }
+    } else {
+      behaviorLine = "action=-\nactionReason=-\nsafetyBlock=-\nactionConf=0.00";
+    }
     String info =
         String.format(
             Locale.US,
-            "state=%s\nforward=%.2f\nturn=%.2f\nleft=%.2f\nright=%.2f\npersons=%d\nfps=%.1f\n%s",
+            "state=%s\nforward=%.2f\nturn=%.2f\nleft=%.2f\nright=%.2f\npersons=%d\nfps=%.1f\n%s\n%s",
             state.name(),
             forward,
             turn,
@@ -477,8 +526,71 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             control.getRight(),
             persons,
             fps,
-            distLine);
+            distLine,
+            behaviorLine);
     requireActivity().runOnUiThread(() -> binding.debugInfo.setText(info));
+  }
+
+  private BehaviorDecisionResult decideBehavior(
+      FollowStateMachine.FrameResult fr, int frameW, int frameH) {
+    IdentityEvidence identity =
+        new IdentityEvidence(
+            fr.matched ? fr.matchScore : 0f,
+            fr.matchScore,
+            fr.matched,
+            fr.matched ? "matched" : "not_matched");
+    DistanceEvidence distance;
+    if (fr.distanceEstimate != null) {
+      distance =
+          new DistanceEvidence(
+              fr.distanceEstimate.state,
+              fr.distanceEstimate.confidence,
+              fr.distanceEstimate.failureReason);
+    } else {
+      distance = new DistanceEvidence(DistanceState.UNKNOWN, 0f, "distance_not_available");
+    }
+    TraversabilityEvidence traversability = estimateTraversability(fr, frameW, frameH);
+    SystemSafetyEvidence safety =
+        new SystemSafetyEvidence(
+            false, true, detector != null, detector == null ? "detector_not_ready" : "ok");
+    BehaviorDecisionResult decision =
+        actionArbitrator.decide(
+            fr.state, identity, distance, traversability, safety, stateMachine.getMemory(), frameW);
+    return new BehaviorDecisionResult(
+        decision.state,
+        decision.selectedAction,
+        decision.actionReason,
+        decision.safetyBlockReason,
+        decision.confidence,
+        distance,
+        traversability);
+  }
+
+  private TraversabilityEvidence estimateTraversability(
+      FollowStateMachine.FrameResult fr, int frameW, int frameH) {
+    if (fr == null || fr.persons == null || frameW <= 0 || frameH <= 0) {
+      return new TraversabilityEvidence(1f, 1f, 1f, false, "default_clear");
+    }
+    boolean centerBlocked = false;
+    float centerFreeScore = 1f;
+    for (Detector.Recognition person : fr.persons) {
+      if (person == null || person == fr.target || person.getLocation() == null) continue;
+      RectF b = person.getLocation();
+      float cxRatio = b.centerX() / frameW;
+      boolean inCenter = cxRatio >= 0.33f && cxRatio <= 0.67f;
+      boolean lowerBodyRisk = b.bottom >= frameH * 0.55f;
+      boolean largeEnough = b.width() * b.height() >= frameW * frameH * 0.03f;
+      if (inCenter && lowerBodyRisk && largeEnough) {
+        centerBlocked = true;
+        centerFreeScore = Math.min(centerFreeScore, 0.2f);
+      }
+    }
+    return new TraversabilityEvidence(
+        1f,
+        centerFreeScore,
+        1f,
+        centerBlocked,
+        centerBlocked ? "non_target_in_center_corridor" : "default_clear");
   }
 
   protected Model getModel() {
