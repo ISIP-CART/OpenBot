@@ -38,6 +38,7 @@ public class FeatureList {
   public static final String OBJECT_NAV = "Object Tracking";
   public static final String CART_SIMULATOR = "Cart Simulator";
   public static final String PERSON_CROP_COLLECTOR = "Person Crop Collector";
+  public static final String PERSON_SEQUENCE_COLLECTOR = "Person Sequence Collector";
   public static final String MODEL_MANAGEMENT = "Model Management";
   public static final String POINT_GOAL_NAVIGATION = "Point Goal Navigation";
   public static final String AUTONOMOUS_DRIVING = "Autonomous Driving";
@@ -87,6 +88,8 @@ public class FeatureList {
     subCategories.add(new SubCategory(CART_SIMULATOR, R.drawable.ic_person_search, "#6BBF8A"));
     subCategories.add(
         new SubCategory(PERSON_CROP_COLLECTOR, R.drawable.ic_person_search, "#8BBF6B"));
+    subCategories.add(
+        new SubCategory(PERSON_SEQUENCE_COLLECTOR, R.drawable.ic_person_search, "#6BA9BF"));
     subCategories.add(
         new SubCategory(POINT_GOAL_NAVIGATION, R.drawable.ic_baseline_golf_course, "#1BBFBF"));
     subCategories.add(new SubCategory(MODEL_MANAGEMENT, R.drawable.ic_list_bulleted_48, "#BC7680"));

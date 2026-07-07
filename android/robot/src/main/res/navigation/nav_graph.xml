@@ -32,6 +32,9 @@
             android:id="@+id/action_mainFragment_to_personCropCollectorFragment"
             app:destination="@id/personCropCollectorFragment" />
         <action
+            android:id="@+id/action_mainFragment_to_personSequenceCollectorFragment"
+            app:destination="@id/personSequenceCollectorFragment" />
+        <action
             android:id="@+id/action_mainFragment_to_modelManagementFragment"
             app:destination="@id/modelManagementFragment" />
         <action
@@ -128,6 +131,12 @@
         android:name="org.openbot.cropcollector.PersonCropCollectorFragment"
         android:label="fragment_person_crop_collector"
         tools:layout="@layout/fragment_person_crop_collector" />
+
+    <fragment
+        android:id="@+id/personSequenceCollectorFragment"
+        android:name="org.openbot.sequencecollector.PersonSequenceCollectorFragment"
+        android:label="fragment_person_sequence_collector"
+        tools:layout="@layout/fragment_person_sequence_collector" />
 
     <fragment
         android:id="@+id/modelManagementFragment"

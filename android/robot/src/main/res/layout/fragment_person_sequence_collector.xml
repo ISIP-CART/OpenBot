@@ -1,0 +1,327 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".sequencecollector.PersonSequenceCollectorFragment">
+
+    <org.openbot.customview.OverlayView
+        android:id="@+id/tracking_overlay"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <TextView
+        android:id="@+id/status_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="80dp"
+        android:background="#80000000"
+        android:paddingHorizontal="24dp"
+        android:paddingVertical="12dp"
+        android:text="@string/person_sequence_idle"
+        android:textColor="#FFFFFF"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <TextView
+        android:id="@+id/debug_info"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="12dp"
+        android:background="#80000000"
+        android:fontFamily="monospace"
+        android:padding="8dp"
+        android:textColor="#FFFFFF"
+        android:textSize="12sp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="persons=0\nframes=0\ndet=0\ncrops=0\nevents=0\nfps=0.0" />
+
+    <ScrollView
+        android:id="@+id/bottom_scroll"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="#CC000000"
+        android:fillViewport="false"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <LinearLayout
+            android:id="@+id/bottom_panel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.4"
+                    android:paddingStart="8dp"
+                    android:paddingVertical="12dp"
+                    android:text="@string/model"
+                    android:textColor="@android:color/white" />
+
+                <Spinner
+                    android:id="@+id/model_spinner"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1.6"
+                    android:prompt="@string/model" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.4"
+                    android:paddingStart="8dp"
+                    android:text="@string/confidence"
+                    android:textColor="@android:color/white" />
+
+                <ImageView
+                    android:id="@+id/minus_confidence"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="0.3"
+                    android:contentDescription="@string/minus"
+                    android:src="@drawable/ic_baseline_remove" />
+
+                <TextView
+                    android:id="@+id/confidence_value"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.4"
+                    android:gravity="center"
+                    android:padding="4dp"
+                    android:text="50%"
+                    android:textColor="@android:color/white" />
+
+                <ImageView
+                    android:id="@+id/plus_confidence"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="0.3"
+                    android:contentDescription="@string/plus"
+                    android:src="@drawable/ic_baseline_add" />
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/save_crops_switch"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1.0"
+                    android:checked="true"
+                    android:text="Crops"
+                    android:textColor="@android:color/white" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.5"
+                    android:paddingStart="8dp"
+                    android:text="Frame:"
+                    android:textColor="@android:color/white" />
+
+                <ImageView
+                    android:id="@+id/minus_frame_interval"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="0.3"
+                    android:contentDescription="@string/minus"
+                    android:src="@drawable/ic_baseline_remove" />
+
+                <TextView
+                    android:id="@+id/frame_interval_value"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.5"
+                    android:gravity="center"
+                    android:text="200ms"
+                    android:textColor="@android:color/white" />
+
+                <ImageView
+                    android:id="@+id/plus_frame_interval"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="0.3"
+                    android:contentDescription="@string/plus"
+                    android:src="@drawable/ic_baseline_add" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.5"
+                    android:paddingStart="8dp"
+                    android:text="Crop:"
+                    android:textColor="@android:color/white" />
+
+                <ImageView
+                    android:id="@+id/minus_crop_interval"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="0.3"
+                    android:contentDescription="@string/minus"
+                    android:src="@drawable/ic_baseline_remove" />
+
+                <TextView
+                    android:id="@+id/crop_interval_value"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0.5"
+                    android:gravity="center"
+                    android:text="500ms"
+                    android:textColor="@android:color/white" />
+
+                <ImageView
+                    android:id="@+id/plus_crop_interval"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="0.3"
+                    android:contentDescription="@string/plus"
+                    android:src="@drawable/ic_baseline_add" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:paddingStart="8dp"
+                    android:text="Person ID:"
+                    android:textColor="@android:color/white" />
+
+                <EditText
+                    android:id="@+id/person_id_input"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:hint="e.g. ysy"
+                    android:inputType="text"
+                    android:maxLines="1"
+                    android:textColor="@android:color/white"
+                    android:textColorHint="#808080" />
+            </LinearLayout>
+
+            <EditText
+                android:id="@+id/note_input"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="event note"
+                android:inputType="text"
+                android:maxLines="1"
+                android:textColor="@android:color/white"
+                android:textColorHint="#808080" />
+
+            <GridLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:columnCount="3">
+
+                <Button
+                    android:id="@+id/btn_target_left"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_columnWeight="1"
+                    android:text="Target Left" />
+
+                <Button
+                    android:id="@+id/btn_target_return"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_columnWeight="1"
+                    android:text="Target Return" />
+
+                <Button
+                    android:id="@+id/btn_manual_note"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_columnWeight="1"
+                    android:text="Note" />
+
+                <Button
+                    android:id="@+id/btn_occlusion_start"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_columnWeight="1"
+                    android:text="Occ Start" />
+
+                <Button
+                    android:id="@+id/btn_occlusion_end"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_columnWeight="1"
+                    android:text="Occ End" />
+
+                <Button
+                    android:id="@+id/btn_distractor_enter"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_columnWeight="1"
+                    android:text="Dist Enter" />
+
+                <Button
+                    android:id="@+id/btn_distractor_leave"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_columnWeight="1"
+                    android:text="Dist Leave" />
+            </GridLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btn_start"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/person_sequence_start" />
+
+                <Button
+                    android:id="@+id/btn_stop"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:text="@string/person_sequence_stop" />
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
