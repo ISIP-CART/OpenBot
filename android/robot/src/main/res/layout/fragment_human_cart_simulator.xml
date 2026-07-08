@@ -31,20 +31,56 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <TextView
-        android:id="@+id/debug_info"
+    <LinearLayout
+        android:id="@+id/debug_panel"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginStart="12dp"
         android:layout_marginTop="12dp"
         android:background="#80000000"
-        android:fontFamily="monospace"
+        android:orientation="vertical"
         android:padding="8dp"
-        android:textColor="#FFFFFF"
-        android:textSize="12sp"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
-        tools:text="state=IDLE\nforward=0.00\nturn=0.00\nleft=0.00\nright=0.00\npersons=0\nfps=0.0" />
+        app:layout_constraintTop_toTopOf="parent">
+
+        <TextView
+            android:id="@+id/debug_info"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            tools:text="fps=0.0\nstate=IDLE\naction=-\npersons=0" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btn_debug_details"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="10dp"
+                android:text="调试详情"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btn_target_event"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:enabled="false"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="10dp"
+                android:text="目标离开画面"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
 
     <TextView
         android:id="@+id/countdown_text"

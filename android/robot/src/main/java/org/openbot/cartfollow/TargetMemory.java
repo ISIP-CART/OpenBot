@@ -21,6 +21,7 @@ public class TargetMemory {
   private float desiredBottomRatio;
 
   private RectF lastBbox;
+  private RectF previousBbox;
   private float lastCenterX;
   private float lastCenterY;
   private float lastArea;
@@ -38,6 +39,7 @@ public class TargetMemory {
     upperColorHist = computeHsvHist(bitmap, upperHalf(bbox));
     lowerColorHist = computeHsvHist(bitmap, lowerHalf(bbox));
     lastBbox = new RectF(bbox);
+    previousBbox = null;
     lastCenterX = bbox.centerX();
     lastCenterY = bbox.centerY();
     lastArea = confirmedArea;
@@ -83,6 +85,7 @@ public class TargetMemory {
   public void updateDynamic(Recognition r) {
     if (r == null || r.getLocation() == null) return;
     RectF b = r.getLocation();
+    if (lastBbox != null) previousBbox = new RectF(lastBbox);
     lastBbox = new RectF(b);
     lastCenterX = b.centerX();
     lastCenterY = b.centerY();
@@ -100,6 +103,7 @@ public class TargetMemory {
     desiredAreaRatio = 0f;
     desiredBottomRatio = 0f;
     lastBbox = null;
+    previousBbox = null;
     lastCenterX = 0f;
     lastCenterY = 0f;
     lastArea = 0f;
@@ -112,6 +116,10 @@ public class TargetMemory {
 
   public RectF getLastBbox() {
     return lastBbox != null ? new RectF(lastBbox) : (confirmedBbox != null ? new RectF(confirmedBbox) : null);
+  }
+
+  public RectF getPreviousBbox() {
+    return previousBbox != null ? new RectF(previousBbox) : null;
   }
 
   public float getLastArea() {

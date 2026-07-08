@@ -3,7 +3,7 @@
 > 所属项目：自主跟随购物车原型
 > 代码位置：`dev/OpenBot/android/robot/src/main/java/org/openbot/cartfollow/`
 > 开发分支：`feature/human-cart-simulator`（Phase 1）/ `feature/distance-control`（Phase 2）/ `feature/person-crop-collector`（Phase 3 起）
-> 最后更新：2026-07-07
+> 最后更新：2026-07-08
 
 ---
 
@@ -13,19 +13,20 @@ Human Cart Simulator 是购物车跟随功能的上位机核心模块，在 Open
 
 ### 文件清单
 
-| 文件 | 行数 | 作用 |
-|------|------|------|
-| `HumanCartSimulatorFragment.java` | 464 | 主 UI Fragment：摄像头预览 + 检测框绘制 + 确认/重拍/取消 + 倒计时 + 距离调试显示 |
-| `ControlGenerator.java` | 110 | 控制算法：基于 DistanceState 决定 forward，转向由 xError 决定 |
-| `FollowStateMachine.java` | 262 | 完整状态机：管理两阶段目标初始化、重识别、倒计时、跟随、丢失、搜索、停止 |
-| `FollowState.java` | 14 | 状态机枚举：`IDLE / CAPTURE_TARGET / LOCKED_PENDING_CONFIRM / CONFIRMED_ARMED / REACQUIRE_TARGET / READY_TO_FOLLOW / FOLLOW / LOST / SEARCH / STOP` |
-| `DistanceState.java` | 7 | 距离状态枚举：`TOO_FAR / OK / TOO_CLOSE / UNKNOWN` |
-| `ImageSetpointDistanceEstimator.java` | 112 | 图像伺服距离估计器：基于初始化 setpoint 输出 height_scale / area_scale / bottom_shift / state / confidence |
-| `TargetMemory.java` | 167 | 目标记忆：confirmedBbox、面积、上下身 HSV 颜色直方图、动态位置、距离 setpoint |
-| `TargetMatcher.java` | 79 | 目标匹配：position + size + color + confidence 融合评分（ReID 接口预留） |
-| `ReIDFeatureExtractor.java` | 5 | ReID 接口占位，尚未接入真实 embedding 推理 |
-| `HumanCommandInterpreter.java` | 52 | 中文指令解释器：支持 DistanceState 重载，输出距离感知指令 |
-| `fragment_human_cart_simulator.xml` | 218 | 布局文件：OverlayView + 指令文本 + 快照确认面板 + 倒计时 + 调试信息 + 底部面板 |
+| 文件 | 作用 |
+|------|------|
+| `HumanCartSimulatorFragment.java` | 主 UI Fragment：摄像头预览、检测框绘制、目标确认、ReID 调度、行为决策 debug 与人类指令显示 |
+| `FollowStateMachine.java` / `FollowState.java` | 管理初始化、确认、重捕获、跟随、谨慎跟随、身份不确定、搜索与停止 |
+| `ActionArbitrator.java` / `BehaviorAction.java` / `BehaviorDecisionResult.java` | 阶段 A 行为层：将状态与证据映射为 `FOLLOW_SLOW / MOTION_STOP / LOCAL_SEARCH / BLOCKED_WAIT` 等动作 |
+| `IdentityEvidence.java` / `DistanceEvidence.java` / `TraversabilityEvidence.java` / `SystemSafetyEvidence.java` | 统一证据结构，供 ActionArbitrator 和 debug 面板使用 |
+| `ControlGenerator.java` | 控制算法：基于 DistanceState 决定 forward，转向由 xError 决定；当前仍只用于模拟提示，不直接控制底盘 |
+| `DistanceState.java` / `ImageSetpointDistanceEstimator.java` | 初始化标定 + 图像伺服距离估计，输出 `TOO_FAR / OK / TOO_CLOSE / UNKNOWN` |
+| `TargetMemory.java` | 目标记忆：confirmed bbox、颜色特征、距离 setpoint、previous/last bbox 和 ReID gallery |
+| `TargetMatcher.java` | legacy 目标匹配：position + size + color + confidence，用于 ReID 不可用时的保守降级 |
+| `ReIDFeatureExtractor.java` / `TfliteReIDFeatureExtractor.java` | ReID 抽象接口与 TFLite 推理实现，当前本地测试模型为 `osnet_x0_25_market1501.tflite` |
+| `ReIDCoordinator.java` / `ReIDMatchResult.java` / `BboxContinuityEvidence.java` | 管理 ReID gallery、候选人推理、best/second/margin、bbox 连续性与推理耗时 |
+| `HumanCommandInterpreter.java` | 将状态、距离和行为动作转换为 Human Cart Simulator 的中文动作提示 |
+| `fragment_human_cart_simulator.xml` | 布局文件：OverlayView、指令文本、快照确认面板、倒计时、调试信息和底部面板 |
 
 ### 集成点（在 OpenBot App 中的入口）
 
@@ -83,6 +84,10 @@ Human Cart Simulator 是购物车跟随功能的上位机核心模块，在 Open
 | 导航集成 | 已完成 | 已注册到主菜单 "Cart Simulator" 入口 |
 | **Person Crop Collector** | 已完成（Phase 3 前置） | 已注册到主菜单，可采集真实 OpenBot person bbox crop、`session_info.json` 与 `metadata.csv` |
 | **真实 crop 数据 PC 端 ReID 复测** | 已完成首轮 | 基于 `images_openbot_clean`、`osnet_x0_25_market1501.pth`、`diverse gallery` 完成 pairwise / gallery-probe / target-follow 模拟 |
+| **Person Sequence Collector** | 已完成 | 可采集无人帧、多人检测、bbox、crop 和人工事件，用于 PC sequence replay |
+| **阶段 A 行为层** | 已完成并通过手机体验 | `Evidence -> BehaviorDecisionResult -> BehaviorAction -> HumanCommand` 已接入 Human Cart Simulator |
+| **阶段 B Android ReID** | 已完成首版并通过手机运行 | TFLite ReID 可运行，debug 字段正常，实机约 30 FPS；仍需阶段 C 轨迹与身份信念层抑制跟错人 |
+| **阶段 C 目标轨迹与身份信念层** | 已完成首版代码接入 | 新增短时 trackId、lockedTrackId、targetBelief 和 suspectedTrack debug，待手机验收调参 |
 
 ### 2.2 Phase 3 首轮 ReID 实验结果（2026-07-06）
 
@@ -173,7 +178,7 @@ ReID margin 可作为身份置信证据，但不能单独恢复 FOLLOW。
 | 功能 | 优先级 | 说明 |
 |------|--------|------|
 | **`vehicle.setControl()` 集成** | 中（阶段6） | 当前 Control 仅显示在 UI 上，未实际发送给底盘。硬件联调阶段在 `processFrame()` 中调用 `vehicle.setControl()` |
-| **目标重锁定增强** | 高 | 当前 LOST/SEARCH 恢复复用 TargetMatcher，尚未接入 Android 端 ReID embedding 与多线索融合。阶段3 继续处理 |
+| **目标轨迹与身份信念层** | 高 | ReID 已接入并能运行，但目标离开/返回和干扰者场景仍可能跟错或恢复过慢；下一阶段需要 `TargetTrackManager + IdentityBeliefAccumulator` |
 | **参数持久化** | 低 | 当前调参仅内存生效，重启恢复默认 |
 | **参数 UI 面板** | 低 | K_TURN / MAX_FORWARD / 阈值等参数需通过代码修改，没有 UI 界面 |
 | **bottomShift 参与判态** | 低 | 当前 bottomShift 仅用于显示，未参与距离状态判断。待 90° 旋转下方向实测验证后决定是否纳入 |
@@ -250,21 +255,38 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 
 - [x] 新增 Person Crop Collector，从 OpenBot Android 导出真实 person bbox crop
 - [x] PC 端验证 confirmedGallery / reid_score / reid_margin（首轮基于 `osnet_x0_25 + diverse gallery-k=8`）
-- [ ] Android 端部署 osnet_x0_25（ONNX Runtime Mobile 主线）
-- [ ] 将 ReID 输出接入 `TargetMemory / TargetMatcher / FollowStateMachine`
-- [ ] 多人/遮挡/重现场景验证，并特别验证目标缺席时的 false accept 抑制
+- [x] Android 端部署 `osnet_x0_25` TFLite 首版，Human Cart Simulator 中 `reidAvailable=true`
+- [x] 将 ReID 输出接入 `IdentityEvidence / FollowStateMachine / ActionArbitrator`
+- [x] 多人、目标离开、目标返回、遮挡场景完成首轮手机观察
+- [ ] 用阶段 C 的 track/belief 层继续降低跟错人风险，提高目标返回后的恢复速度
 
-### Phase 4：单目深度辅助
+### Phase 4：目标轨迹与身份信念层（当前下一步）
 
-- [ ] MiDaS / Depth Anything Android 部署调研
-- [ ] 作为距离/障碍风险辅助，不替代安全状态机
+- [x] 新增轻量 `TargetTrackManager`，用 bbox IoU / center distance / area ratio 维护短时 trackId
+- [x] 新增 `IdentityBeliefAccumulator`，对每个 track 累计 targetBelief
+- [x] locked target 不因干扰者单帧 ReID 高分被抢走，状态机恢复改为 belief 优先
+- [x] 目标返回后通过 suspected track + 多帧 belief 稳定恢复到 `REACQUIRE_TARGET / FOLLOW_CAUTION`
+- [x] debug 面板显示 `trackId / lockedTrackId / targetBelief / trackAge / missedFrames / beliefReason`
+- [ ] 手机实测验收：目标离开、干扰者进入、目标返回、目标在场干扰者穿越、遮挡
 
-### Phase 5：局部可通行空间与跟随式避障
+### Phase 5：距离控制继续收敛
+
+- [x] 初始化距离标定 + 图像伺服首版已完成
+- [ ] 结合阶段 C 的稳定目标 track 重新验证 `TOO_FAR / OK / TOO_CLOSE`
+- [ ] 评估 bottomShift 是否纳入距离状态判断
+
+### Phase 6：局部可通行空间与跟随式避障
 
 - [ ] LEFT / CENTER / RIGHT 三方向 free score
 - [ ] 候选动作 SLOW_FORWARD / LEFT_ARC / RIGHT_ARC / BLOCKED_WAIT
 
-### Phase 6：硬件联调
+### Phase 7：性能评估与增强开关
+
+- [ ] 记录 detector、ReID、track/belief、ActionArbitrator 耗时
+- [ ] 根据手机性能决定是否提高 ReID 频率
+- [ ] 评估 MiDaS / Depth Anything Android 部署，只作为距离/障碍风险增强
+
+### Phase 8：硬件联调
 
 - [ ] 接通 `vehicle.setControl()` 到底盘
 - [ ] 真实车速/转向半径/延迟标定
@@ -288,7 +310,10 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 | `6d9aa5f` | 2026-07-06 | Add capture controls and status panel |
 | `765eb82` | 2026-07-06 | Put Person ID input on its own row for tap accessibility |
 | `771345e` | 2026-07-06 | Rotate crop by sensorOrientation before saving to disk |
-| pending | 2026-07-07 | Add PersonSequenceCollector for continuous sequence data collection |
+| recorded | 2026-07-07 | Add PersonSequenceCollector for continuous sequence data collection |
+| recorded | 2026-07-08 | Add phase A behavior decision layer and Human Cart Simulator action debug |
+| recorded | 2026-07-08 | Add phase B TFLite ReID evidence path for Human Cart Simulator |
+| pending | 2026-07-08 | Add phase C TargetTrack and IdentityBelief layer |
 
 ---
 
@@ -445,3 +470,295 @@ STOP
 - 采集目录导出到 PC 后，用 `tools/reid_pc_test/prepare_openbot_crops_dataset.py` 整理为 `images_openbot_clean/`
 - 主菜单 → "Person Sequence Collector" 进入连续时序采集页
 - Sequence 采集时事件按钮只需在事件开始/结束时各按一次，PC replay 会用容忍窗口处理人工反应延迟
+
+---
+
+## 9. Phase B：ReID 身份证据接入与安全重捕获闭环（2026-07-08）
+
+本阶段根据 Human Cart Simulator 阶段 A 的手机验收反馈推进：阶段 A 的行为层基本可用，但目标重新进入、干扰者进入等场景仍可能因为旧 `TargetMatcher` 单帧匹配而出现“跟错人”。因此 Phase B 的首要目标是切断 `LOST / SEARCH -> FOLLOW` 的单帧恢复路径，并把 ReID 作为身份置信度证据接入状态机。
+
+已完成代码改动：
+
+- 新增 `ReIDMatchResult`、`BboxContinuityEvidence`、`TfliteReIDFeatureExtractor`、`ReIDCoordinator`。
+- `FollowState` 新增 `FOLLOW_CAUTION` 与 `IDENTITY_UNCERTAIN`。
+- `TargetMemory` 增加 previous bbox 记录，用于 bbox 连续性和简单 prediction 计算。
+- `IdentityEvidence` 扩展为同时携带 legacy score、ReID score / margin、bbox gate、稳定帧数和候选切换次数。
+- `FollowStateMachine` 改为支持外部 `IdentityEvidence` 输入；`LOST / SEARCH` 不再允许单帧匹配直接恢复 `FOLLOW`，而是先进入 `REACQUIRE_TARGET`，再经多帧稳定证据恢复。
+- `ActionArbitrator` 增加 `IDENTITY_UNCERTAIN` 和 `FOLLOW_CAUTION` 的动作解释。
+- `HumanCartSimulatorFragment` 接入 `ReIDCoordinator`，在 debug 面板显示 `reidAvailable / gallerySize / bestScore / secondScore / margin / weak-mid-strong / bboxDefault-bboxStrict-prediction / stableMatchCount / candidateSwitchCount / reidLatencyMs / reidReason`。
+
+TFLite 路线说明：
+
+- 首版复用当前工程已有 TensorFlow Lite 2.4，不新增 ONNX Runtime 依赖。
+- 默认模型路径为 `assets/networks/reid/osnet_x0_25_market1501.tflite`。
+- 该模型文件属于本地测试资产，`.gitignore` 已忽略 `*.tflite`，默认不提交。
+- 如果模型不存在或加载失败，App 不崩溃，debug 显示 `reidAvailable=false`，状态机退回更保守的 bbox / color / motion 逻辑。
+
+构建验证：
+
+```powershell
+$env:JAVA_HOME='D:\Java\jdk-17'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过，生成 `robot/build/outputs/apk/debug/robot-debug.apk`。当前本机输出过 Android SDK XML version warning，但未影响构建结果。
+
+后续手机验收重点：
+
+- 无 ReID 模型时：Human Cart Simulator 应正常打开，debug 显示 `reidAvailable=false`，目标丢失后不应单帧恢复 `FOLLOW`。
+- 放入 TFLite 模型后：确认目标后 `gallerySize` 应逐步达到 8 或实际可用数量；多人、目标离开、目标返回、遮挡场景下观察 `bestScore / margin / stableMatchCount` 是否符合预期。
+- 目标返回时允许 `IDENTITY_UNCERTAIN -> REACQUIRE_TARGET -> FOLLOW`，但不允许单帧高分直接恢复 `FOLLOW`。
+
+---
+
+## 10. Phase B 实机验收更新：ReID 已跑通，但需要 TargetTrack / IdentityBelief（2026-07-08）
+
+### 10.1 当前实机状态
+
+最新 APK 已安装到手机，Human Cart Simulator 中 ReID 首版链路已经成功运行：
+
+- TFLite 模型路径：`assets/networks/reid/osnet_x0_25_market1501.tflite`
+- 模型输入：`[1,3,256,128]`
+- 模型输出：`[1,512]`
+- debug 面板显示的 ReID 字段基本正常
+- 实机帧率约 30 FPS，首轮性能可接受，后续如有必要仍可继续压榨调度策略
+
+当前结论：ReID Android 接入已经从“能否加载/能否推理”进入“如何安全使用推理结果”的阶段。
+
+### 10.2 当前体验问题
+
+手机实测仍暴露两个关键问题：
+
+1. 目标离开画面或多人接近时，虽然统计上比纯 bbox / color 匹配更安全，但仍可能识别错目标并跟着别人走。
+2. 目标重新回到画面后，重捕获有时偏慢，甚至无法及时确认。
+
+这说明当前 `ReIDMatchResult + bbox gate + stable frame` 仍偏“单帧候选驱动”。ReID 分数和 margin 有帮助，但不能直接等价于目标身份。
+
+### 10.3 下一步代码方向
+
+下一步建议在 `ReIDCoordinator` 与 `FollowStateMachine` 之间新增轻量轨迹和身份信念层：
+
+```text
+Detector persons
+  -> TargetTrackManager
+  -> IdentityBeliefAccumulator
+  -> FollowStateMachine
+  -> ActionArbitrator
+```
+
+建议新增或细化类型：
+
+- `TargetTrack`
+  - `trackId`
+  - `lastBbox`
+  - `previousBbox`
+  - `ageFrames`
+  - `missedFrames`
+  - `lastSeenTimestampMs`
+  - `isNearPredictionRegion`
+
+- `TargetTrackManager`
+  - 用 bbox IoU、center distance、area ratio 做短时 person bbox 关联。
+  - 只维护最近几秒的轻量 track，不做复杂多目标跟踪。
+  - 输出当前候选 tracks，供 ReID 和状态机使用。
+
+- `IdentityBelief`
+  - `trackId`
+  - `targetBelief`
+  - `reidContribution`
+  - `bboxContribution`
+  - `predictionContribution`
+  - `switchPenalty`
+  - `stableFrames`
+  - `beliefReason`
+
+- `IdentityBeliefAccumulator`
+  - 对每个 track 累计身份信念。
+  - ReID strong/mid、bbox 连续、prediction 命中时加分。
+  - 候选切换、bbox 跳变、面积突变、margin 低、多人与目标混淆时扣分。
+
+### 10.4 状态机接入原则
+
+后续恢复跟随不应再由“单帧候选高分”触发，而应由“稳定 track + 稳定 belief”触发：
+
+```text
+IDENTITY_UNCERTAIN / SEARCH
+  -> 疑似目标 track 连续稳定
+  -> REACQUIRE_TARGET
+  -> FOLLOW_CAUTION
+  -> FOLLOW_CONFIDENT
+```
+
+安全边界保持不变：
+
+- 身份不确定时线速度为 0。
+- 搜索阶段可以更积极地原地扫描和提高 ReID 频率，但不能向前跟随。
+- 已锁定目标时，干扰者一帧 ReID 高分不能直接抢走目标。
+- hard `STOP` 仍只作为搜索失败、风险过高或安全异常后的兜底终态。
+
+### 10.5 下一轮手机验收新增观察项
+
+debug 面板建议新增：
+
+```text
+trackId
+trackAge
+missedFrames
+targetBelief
+beliefReason
+activeTrackCount
+lockedTrackId
+```
+
+验收场景：
+
+1. 单人正常跟随：trackId 应稳定，targetBelief 应逐步升高。
+2. 目标离开：进入 motion_stop / search，lockedTrack 不应被立即替换。
+3. 干扰者进入：干扰者可形成新 track，但 targetBelief 不应快速超过恢复阈值。
+4. 目标返回：先成为疑似目标，连续稳定后恢复 `REACQUIRE_TARGET -> FOLLOW_CAUTION / FOLLOW_CONFIDENT`。
+5. 目标在场且干扰者穿越：lockedTrack 应尽量保持，必要时进入 `FOLLOW_CAUTION / IDENTITY_UNCERTAIN`，不冒进切换。
+
+---
+
+## 11. Phase C：目标轨迹与身份信念层首版实现（2026-07-08）
+
+### 11.1 新增代码
+
+| 文件 | 作用 |
+|------|------|
+| `TargetTrack.java` | 记录短时 track 的 `trackId / lastBbox / previousBbox / ageFrames / missedFrames / stableFrames`。 |
+| `TargetTrackManager.java` | 用 bbox IoU、中心距离、面积比例将连续检测框关联为 track，并维护 `lockedTrackId / suspectedTrackId`。 |
+| `IdentityBelief.java` | 定义 `BELIEF_CONFIRM=0.75 / BELIEF_CAUTION=0.55 / BELIEF_LOST=0.30` 和 belief debug 字段。 |
+| `IdentityBeliefAccumulator.java` | 融合 ReID、bbox continuity、prediction、locked target、track age、candidate switch 和 missed frame，输出带 belief 的 `IdentityEvidence`。 |
+
+### 11.2 接入点
+
+- `HumanCartSimulatorFragment` 每帧检测后先调用 `TargetTrackManager.update()`。
+- ReID 单帧输出不再直接交给状态机，而是先通过 `IdentityBeliefAccumulator.update()` 转换为累计身份信念。
+- 用户点击 Confirm 时调用 `lockClosest(memory.getLastBbox())`，建立 `lockedTrackId`。
+- overlay 现在显示 `T<trackId> b=<belief>`；locked track 绿色，suspected track 黄色。
+- debug 面板新增 `activeTrackCount / trackId / lockedTrackId / suspectedTrackId / trackAge / missedFrames / belief / beliefReason`。
+- `FollowStateMachine` 在 `IdentityEvidence.hasBelief()` 时优先使用 `targetBelief + beliefStableFrames + bbox/prediction/lockedTrack` 判断 `FOLLOW / FOLLOW_CAUTION / REACQUIRE_TARGET / IDENTITY_UNCERTAIN`。
+
+### 11.3 构建验证
+
+构建命令：
+
+```powershell
+$env:JAVA_HOME='D:\Java\jdk-17'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过，生成 debug APK。构建日志仍有 TensorFlow Lite manifest namespace warning 和 Kotlin/Javac target warning，均未阻塞构建。
+
+### 11.4 手机验收重点
+
+1. 单人正常跟随：`trackId` 应稳定，`targetBelief` 应逐步升高并保持。
+2. 目标离开画面：动作应进入 motion stop / local search，不继续前进。
+3. 目标离开后干扰者进入：干扰者可形成新 track，但不应快速获得恢复 `FOLLOW` 的 belief。
+4. 目标返回：应先成为 suspected track，经多帧 belief 稳定后恢复到 `REACQUIRE_TARGET / FOLLOW_CAUTION`。
+5. 目标在场时干扰者穿越：locked track 不应被一帧高 ReID 分数抢走；必要时进入 `FOLLOW_CAUTION / IDENTITY_UNCERTAIN`。
+
+---
+
+## 12. Phase C 诊断采集与 UI 简化（2026-07-08）
+
+### 12.1 实现目的
+
+阶段 C 首轮实机验收后，仍观察到两类问题：
+
+- 目标回到画面后长期停留在黄框，迟迟不转为绿框；
+- 非目标人物偶发转绿，表现为疑似跟错人。
+
+本轮没有继续修改 ReID、belief、relock 或状态机阈值，而是先在 Human Cart Simulator 中加入诊断采集能力，用真实日志解释问题发生在哪个环节。
+
+### 12.2 新增代码
+
+| 文件 | 作用 |
+|------|------|
+| `cartfollow/diagnostics/CartFollowDiagnosticConfig.java` | 管理 frame log、crop、overlay 采样间隔和 JPEG 参数。 |
+| `cartfollow/diagnostics/CartFollowDiagnosticSession.java` | 创建 `cartfollow_diagnostics/<session_id>/`，初始化 CSV、gallery/crops/overlays 目录和 `session_info.json`。 |
+| `cartfollow/diagnostics/CartFollowDiagnosticSaver.java` | 单线程异步写 `frame_log.csv`、`identity_log.csv`、`events.csv`，并低频保存 locked/suspected/best_reid crop 与初始化 gallery snapshot。 |
+| `HumanCartSimulatorFragment.java` | 接入诊断 session 生命周期、人工事件按钮、低频日志保存和简洁/完整 debug 切换。 |
+| `fragment_human_cart_simulator.xml` | 新增 `调试详情` 按钮和 `目标离开画面 / 目标回到画面` 事件按钮。 |
+
+### 12.3 输出目录与文件
+
+输出位置：
+
+```text
+/sdcard/Android/data/org.openbot/files/Pictures/cartfollow_diagnostics/
+└── cart_diag_<yyyyMMdd_HHmmss>/
+    ├── frame_log.csv
+    ├── identity_log.csv
+    ├── events.csv
+    ├── session_info.json
+    ├── crops/
+    ├── gallery/
+    └── overlays/
+```
+
+`frame_log.csv` 记录每 200 ms 左右的状态机、行为动作、人类指令和人数：
+
+```text
+session_id,frame_id,timestamp_ms,elapsed_ms,fps,num_persons,
+follow_state,selected_action,action_reason,safety_block_reason,command_text
+```
+
+`identity_log.csv` 记录每 200 ms 左右的 track、ReID、bbox gate、belief 和 crop 路径：
+
+```text
+session_id,frame_id,timestamp_ms,
+track_id,locked_track_id,suspected_track_id,active_track_count,
+track_age,missed_frames,best_score,second_score,margin,gallery_size,
+weak_ok,mid_ok,strong_ok,bbox_default_ok,bbox_strict_ok,prediction_ok,
+target_belief,belief_stable_frames,belief_uncertain_frames,
+candidate_switch_count,belief_reason,reid_reason,
+locked_crop_path,suspected_crop_path,best_reid_crop_path
+```
+
+`events.csv` 记录人工事件：
+
+```text
+session_id,timestamp_ms,frame_id,event_type,note
+```
+
+当前人工事件只包括：
+
+- `target_left`
+- `target_return`
+- `session_stop`
+
+### 12.4 UI 行为
+
+- 默认左上角只显示简洁 debug：`fps / state / action / persons / track / locked / suspected / belief / best / margin`。
+- 点击 `调试详情` 后显示原完整 debug，再次点击 `收起详情` 回到简洁显示。
+- `目标离开画面` 按钮在目标确认前禁用。
+- 用户点击 `确认` 后诊断 session 正式启用，事件按钮可用。
+- 第一次点击事件按钮写入 `target_left`，按钮文本切换为 `目标回到画面`。
+- 第二次点击写入 `target_return`，按钮文本切回 `目标离开画面`。
+- 该按钮只写日志，不改变状态机、ReID、track、belief 或 action。
+
+### 12.5 构建验证
+
+构建命令：
+
+```powershell
+$env:JAVA_HOME='D:\Java\jdk-17'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过，生成 debug APK。构建日志仍包含 TensorFlow Lite manifest namespace warning、Kotlin/Javac target warning 和若干 deprecated API warning，均未阻塞构建。
+
+### 12.6 手机验收重点
+
+1. Start 后、确认目标前，事件按钮应禁用。
+2. 确认目标后，事件按钮启用，默认显示 `目标离开画面`。
+3. 目标离开时点击一次，`events.csv` 应出现 `target_left`。
+4. 目标返回时再点击一次，`events.csv` 应出现 `target_return`。
+5. 默认左上角不再显示大块完整 debug；点击 `调试详情` 后可展开完整字段。
+6. Stop / Cancel / Retake / 页面暂停后，诊断 session 应关闭，按钮禁用并复位。
+7. 导出诊断目录后，应能用 `events.csv` 附近的 `frame_log.csv` 和 `identity_log.csv` 判断黄框不转绿或非目标转绿的原因。

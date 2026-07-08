@@ -6,6 +6,7 @@ import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.app.Activity;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -24,6 +25,9 @@ import java.util.List;
 import java.util.Locale;
 import org.jetbrains.annotations.NotNull;
 import org.openbot.R;
+import org.openbot.cartfollow.diagnostics.CartFollowDiagnosticConfig;
+import org.openbot.cartfollow.diagnostics.CartFollowDiagnosticSaver;
+import org.openbot.cartfollow.diagnostics.CartFollowDiagnosticSession;
 import org.openbot.common.CameraFragment;
 import org.openbot.databinding.FragmentHumanCartSimulatorBinding;
 import org.openbot.env.ImageUtils;
@@ -68,6 +72,20 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private final TargetMatcher matcher = new TargetMatcher();
   private final FollowStateMachine stateMachine =
       new FollowStateMachine(matcher, controlGenerator);
+  private final ActionArbitrator actionArbitrator = new ActionArbitrator();
+  private final TargetTrackManager targetTrackManager = new TargetTrackManager();
+  private final IdentityBeliefAccumulator beliefAccumulator = new IdentityBeliefAccumulator();
+  private ReIDCoordinator reidCoordinator;
+  private final CartFollowDiagnosticConfig diagnosticConfig = new CartFollowDiagnosticConfig();
+  private final CartFollowDiagnosticSaver diagnosticSaver = new CartFollowDiagnosticSaver();
+  private CartFollowDiagnosticSession diagnosticSession;
+  private boolean diagnosticActive = false;
+  private boolean targetEventAwaitingReturn = false;
+  private boolean showFullDebug = false;
+  private long lastDiagnosticFrameLogMs = 0L;
+  private long lastDiagnosticCropMs = 0L;
+  private long lastDiagnosticGalleryMs = 0L;
+  private Bitmap latestConfirmSnapshot;
 
   private final List<DrawBox> drawBoxes = new ArrayList<>();
   private int drawFrameWidth = 0;
@@ -109,6 +127,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   @Override
   public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
     super.onViewCreated(view, savedInstanceState);
+    reidCoordinator = new ReIDCoordinator(requireActivity(), getNumThreads());
 
     binding.confidenceValue.setText((int) (minConfidence * 100) + "%");
     binding.plusConfidence.setOnClickListener(
@@ -136,19 +155,60 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     setAnalyserResolution(Enums.Preview.HD.getValue());
 
     binding.trackingOverlay.addCallback(canvas -> drawOverlay(canvas));
+    binding.btnDebugDetails.setOnClickListener(
+        v -> {
+          showFullDebug = !showFullDebug;
+          binding.btnDebugDetails.setText(showFullDebug ? "收起详情" : "调试详情");
+        });
+    resetTargetEventButton();
+    binding.btnTargetEvent.setOnClickListener(v -> recordTargetEvent());
 
-    binding.btnConfirm.setOnClickListener(v -> stateMachine.confirm());
-    binding.btnRetake.setOnClickListener(v -> stateMachine.retake());
-    binding.btnCancel.setOnClickListener(v -> stateMachine.cancel());
+    binding.btnConfirm.setOnClickListener(
+        v -> {
+          if (reidCoordinator != null) reidCoordinator.confirmGallery();
+          int lockedTrackId = targetTrackManager.lockClosest(stateMachine.getMemory().getLastBbox());
+          beliefAccumulator.lockTrack(lockedTrackId);
+          activateDiagnosticSession();
+          if (latestConfirmSnapshot != null) {
+            diagnosticSaver.saveGallerySnapshotAsync(
+                latestConfirmSnapshot, diagnosticSession, "confirmed_snapshot");
+          }
+          stateMachine.confirm();
+        });
+    binding.btnRetake.setOnClickListener(
+        v -> {
+          if (reidCoordinator != null) reidCoordinator.reset();
+          targetTrackManager.reset();
+          beliefAccumulator.reset();
+          stopDiagnosticSession();
+          startDiagnosticSession();
+          stateMachine.retake();
+        });
+    binding.btnCancel.setOnClickListener(
+        v -> {
+          if (reidCoordinator != null) reidCoordinator.reset();
+          targetTrackManager.reset();
+          beliefAccumulator.reset();
+          stopDiagnosticSession();
+          stateMachine.cancel();
+        });
 
     binding.startSwitch.setChecked(false);
     binding.startSwitch.setOnClickListener(
         v -> {
           if (binding.startSwitch.isChecked()) {
             binding.modelSpinner.setEnabled(false);
+            if (reidCoordinator != null) reidCoordinator.reset();
+            targetTrackManager.reset();
+            beliefAccumulator.reset();
+            startDiagnosticSession();
             stateMachine.startCapture();
           } else {
             binding.modelSpinner.setEnabled(true);
+            if (reidCoordinator != null) reidCoordinator.reset();
+            targetTrackManager.reset();
+            beliefAccumulator.reset();
+            stopDiagnosticSession();
             stateMachine.cancel();
             resetUiToIdle();
           }
@@ -157,7 +217,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private void resetUiToIdle() {
     updateCommandText(getString(R.string.cart_sim_idle));
-    updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f, null);
+    updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f, null, null, null);
     if (binding != null) {
       binding.confirmPanel.setVisibility(View.GONE);
       binding.countdownText.setVisibility(View.GONE);
@@ -236,6 +296,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   @Override
   public synchronized void onPause() {
+    stopDiagnosticSession();
     handlerThread.quitSafely();
     try {
       handlerThread.join();
@@ -245,6 +306,12 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       e.printStackTrace();
     }
     super.onPause();
+  }
+
+  @Override
+  public void onDestroy() {
+    diagnosticSaver.shutdown();
+    super.onDestroy();
   }
 
   protected synchronized void runInBackground(final Runnable r) {
@@ -299,14 +366,62 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
             int frameW = getMaxAnalyseImageSize().getWidth();
             int frameH = getMaxAnalyseImageSize().getHeight();
+            targetTrackManager.update(
+                mappedRecognitions, frameW, frameH, SystemClock.elapsedRealtime());
+            FollowState currentState = stateMachine.getState();
+            Detector.Recognition largestPerson = selectLargest(mappedRecognitions);
+            if (currentState == FollowState.CAPTURE_TARGET) {
+              if (reidCoordinator != null) {
+                reidCoordinator.collectInitializationCandidate(workingFrame, largestPerson);
+              }
+              maybeSaveGalleryCandidate(workingFrame, largestPerson);
+            }
+            TargetMatcher.MatchResult legacyMatch =
+                matcher.match(
+                    mappedRecognitions, workingFrame, stateMachine.getMemory(), frameW, frameH);
+            IdentityEvidence identity =
+                reidCoordinator == null
+                    ? null
+                    : reidCoordinator.evaluate(
+                        mappedRecognitions,
+                        workingFrame,
+                        stateMachine.getMemory(),
+                        currentState,
+                        frameW,
+                        frameH,
+                        legacyMatch.score,
+                        legacyMatch.matched,
+                        legacyMatch.best);
+            if (identity != null) {
+              TargetTrack reidCandidateTrack =
+                  targetTrackManager.getTrackForRecognition(identity.bestCandidate);
+              identity =
+                  beliefAccumulator.update(
+                      identity,
+                      targetTrackManager,
+                      reidCandidateTrack,
+                      stateMachine.getMemory(),
+                      frameW,
+                      frameH);
+            }
             FollowStateMachine.FrameResult fr =
                 stateMachine.onFrame(
-                    mappedRecognitions, workingFrame, frameW, frameH, sensorOrientation);
+                    mappedRecognitions, workingFrame, frameW, frameH, sensorOrientation, identity);
+            fr.behaviorDecision = decideBehavior(fr, frameW, frameH);
 
             updateDrawState(fr, frameW, frameH, sensorOrientation);
-            updateCommandText(commandForState(fr));
+            String commandText = commandForState(fr);
+            updateCommandText(commandText);
             float fps = lastProcessingTimeMs > 0 ? 1000f / lastProcessingTimeMs : 0f;
-            updateDebugInfo(fr.state, fr.control, fr.persons.size(), fps, fr.distanceEstimate);
+            maybeSaveDiagnostics(workingFrame, fr, fps, commandText, frameW, frameH, sensorOrientation);
+            updateDebugInfo(
+                fr.state,
+                fr.control,
+                fr.persons.size(),
+                fps,
+                fr.distanceEstimate,
+                fr.behaviorDecision,
+                fr.identityEvidence);
             updateUiForState(fr);
             binding.trackingOverlay.postInvalidate();
           }
@@ -325,12 +440,23 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     for (Detector.Recognition r : fr.persons) {
       if (r == null || r.getLocation() == null) continue;
       int colorType = COLOR_NORMAL;
-      if (r == fr.target) {
+      TargetTrack track = targetTrackManager.getTrackForRecognition(r);
+      if (track != null && targetTrackManager.isLockedTrack(track)) {
+        colorType = COLOR_TARGET;
+      } else if (track != null && track.trackId == targetTrackManager.getSuspectedTrackId()) {
+        colorType = COLOR_CANDIDATE;
+      } else if (r == fr.target) {
         colorType = fr.matched ? COLOR_TARGET : COLOR_FAIL;
       } else if (r == fr.candidate) {
         colorType = COLOR_CANDIDATE;
       }
-      drawBoxes.add(new DrawBox(new RectF(r.getLocation()), colorType));
+      String label = null;
+      if (track != null) {
+        label =
+            String.format(
+                Locale.US, "T%d b=%.2f", track.trackId, beliefAccumulator.getBeliefForTrack(track));
+      }
+      drawBoxes.add(new DrawBox(new RectF(r.getLocation()), colorType, label));
     }
     drawFrameWidth = frameW;
     drawFrameHeight = frameH;
@@ -362,19 +488,19 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       RectF rect = new RectF(box.location);
       matrix.mapRect(rect);
       Paint paint;
-      String label = null;
+      String label = box.label;
       switch (box.colorType) {
         case COLOR_TARGET:
           paint = targetBoxPaint;
-          label = "目标";
+          if (label == null) label = "目标";
           break;
         case COLOR_CANDIDATE:
           paint = candidateBoxPaint;
-          label = "候选";
+          if (label == null) label = "候选";
           break;
         case COLOR_FAIL:
           paint = failBoxPaint;
-          label = "匹配失败";
+          if (label == null) label = "匹配失败";
           break;
         default:
           paint = personBoxPaint;
@@ -389,6 +515,26 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   }
 
   private String commandForState(FollowStateMachine.FrameResult fr) {
+    if (fr.behaviorDecision != null) {
+      switch (fr.behaviorDecision.selectedAction) {
+        case LOCAL_SEARCH_LEFT:
+          return HumanCommandInterpreter.CMD_TURN_LEFT;
+        case LOCAL_SEARCH_RIGHT:
+          return HumanCommandInterpreter.CMD_TURN_RIGHT;
+        case BLOCKED_WAIT:
+          return "前方受阻，请停止等待";
+        case MOTION_STOP:
+        case HARD_STOP:
+        case EMERGENCY_STOP:
+          return HumanCommandInterpreter.CMD_STOP;
+        case REACQUIRE_HOLD:
+          return "疑似目标，请停止确认";
+        case FOLLOW_SLOW:
+        case FOLLOW_CAUTION:
+        default:
+          break;
+      }
+    }
     switch (fr.state) {
       case IDLE:
         return "待命，打开 Start 开始采集目标";
@@ -403,10 +549,13 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       case READY_TO_FOLLOW:
         return fr.countdownSec >= 0 ? fr.countdownSec + " 秒后启动" : "准备启动";
       case FOLLOW:
+      case FOLLOW_CAUTION:
         if (fr.distanceEstimate != null) {
           return interpreter.interpret(fr.control, fr.state, fr.distanceEstimate.state);
         }
         return interpreter.interpret(fr.control, fr.state, fr.tooClose);
+      case IDENTITY_UNCERTAIN:
+        return "身份不确定，请停止";
       case LOST:
         return "目标丢失，请停止";
       case SEARCH:
@@ -432,6 +581,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
               boolean showConfirm = fr.state == FollowState.LOCKED_PENDING_CONFIRM;
               binding.confirmPanel.setVisibility(showConfirm ? View.VISIBLE : View.GONE);
               if (showConfirm && fr.snapshot != null) {
+                latestConfirmSnapshot = fr.snapshot;
                 binding.snapshotView.setImageBitmap(fr.snapshot);
               }
               boolean showCountdown = fr.state == FollowState.READY_TO_FOLLOW;
@@ -443,12 +593,166 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             });
   }
 
+  private void startDiagnosticSession() {
+    stopDiagnosticSession();
+    diagnosticSession = new CartFollowDiagnosticSession(requireContext().getApplicationContext());
+    diagnosticSession.initCsvFiles();
+    diagnosticActive = false;
+    targetEventAwaitingReturn = false;
+    latestConfirmSnapshot = null;
+    lastDiagnosticFrameLogMs = 0L;
+    lastDiagnosticCropMs = 0L;
+    lastDiagnosticGalleryMs = 0L;
+    resetTargetEventButton();
+  }
+
+  private void activateDiagnosticSession() {
+    if (diagnosticSession == null) {
+      startDiagnosticSession();
+    }
+    diagnosticActive = true;
+    targetEventAwaitingReturn = false;
+    String detectorName = getModel() == null ? "" : getModel().name;
+    boolean reidAvailable = reidCoordinator != null && reidCoordinator.isAvailable();
+    int gallerySize = reidCoordinator == null ? 0 : reidCoordinator.getGallerySize();
+    diagnosticSession.writeSessionInfo(
+        diagnosticConfig, detectorName, minConfidence, reidAvailable, gallerySize);
+    resetTargetEventButton();
+    Toast.makeText(
+            requireContext(),
+            "Diagnostic: " + diagnosticSession.sessionDir.getAbsolutePath(),
+            Toast.LENGTH_SHORT)
+        .show();
+  }
+
+  private void stopDiagnosticSession() {
+    if (diagnosticSession != null && diagnosticActive) {
+      diagnosticSaver.saveEventAsync(diagnosticSession, frameNum, "session_stop", "");
+    }
+    diagnosticActive = false;
+    diagnosticSession = null;
+    targetEventAwaitingReturn = false;
+    lastDiagnosticFrameLogMs = 0L;
+    lastDiagnosticCropMs = 0L;
+    lastDiagnosticGalleryMs = 0L;
+    resetTargetEventButton();
+  }
+
+  private void resetTargetEventButton() {
+    if (binding == null) return;
+    Activity activity = getActivity();
+    if (activity == null) return;
+    activity.runOnUiThread(
+        () -> {
+          if (binding == null) return;
+          binding.btnTargetEvent.setEnabled(diagnosticActive);
+          binding.btnTargetEvent.setText(
+              targetEventAwaitingReturn ? "目标回到画面" : "目标离开画面");
+        });
+  }
+
+  private void recordTargetEvent() {
+    if (!diagnosticActive || diagnosticSession == null) return;
+    String eventType = targetEventAwaitingReturn ? "target_return" : "target_left";
+    diagnosticSaver.saveEventAsync(diagnosticSession, frameNum, eventType, "");
+    targetEventAwaitingReturn = !targetEventAwaitingReturn;
+    resetTargetEventButton();
+  }
+
+  private void maybeSaveDiagnostics(
+      Bitmap workingFrame,
+      FollowStateMachine.FrameResult fr,
+      float fps,
+      String commandText,
+      int frameW,
+      int frameH,
+      int sensorOrientation) {
+    if (!diagnosticActive || diagnosticSession == null || fr == null) return;
+    long now = SystemClock.elapsedRealtime();
+    boolean shouldLog =
+        lastDiagnosticFrameLogMs == 0L
+            || now - lastDiagnosticFrameLogMs >= diagnosticConfig.frameLogIntervalMs;
+    boolean shouldSaveCrop =
+        lastDiagnosticCropMs == 0L || now - lastDiagnosticCropMs >= diagnosticConfig.cropIntervalMs;
+    if (!shouldLog && !shouldSaveCrop) return;
+    if (shouldLog) lastDiagnosticFrameLogMs = now;
+    if (shouldSaveCrop) lastDiagnosticCropMs = now;
+
+    Detector.Recognition locked = recognitionForTrack(targetTrackManager.getLockedTrack());
+    TargetTrack suspectedTrack = targetTrackManager.getTrackById(targetTrackManager.getSuspectedTrackId());
+    Detector.Recognition suspected = recognitionForTrack(suspectedTrack);
+    Detector.Recognition bestReid =
+        reidCoordinator == null ? null : reidCoordinator.getLastBestCandidate();
+    diagnosticSaver.saveFrameAsync(
+        workingFrame,
+        diagnosticSession,
+        diagnosticConfig,
+        frameNum,
+        frameW,
+        frameH,
+        sensorOrientation,
+        fps,
+        fr.persons == null ? 0 : fr.persons.size(),
+        fr.state.name(),
+        fr.behaviorDecision,
+        commandText,
+        fr.identityEvidence,
+        locked,
+        suspected,
+        bestReid,
+        shouldSaveCrop);
+  }
+
+  private void maybeSaveGalleryCandidate(Bitmap frame, Detector.Recognition candidate) {
+    if (diagnosticSession == null || frame == null || candidate == null) return;
+    if (candidate.getLocation() == null) return;
+    long now = SystemClock.elapsedRealtime();
+    if (lastDiagnosticGalleryMs != 0L
+        && now - lastDiagnosticGalleryMs < diagnosticConfig.cropIntervalMs) {
+      return;
+    }
+    Bitmap crop = cropPerson(frame, candidate.getLocation(), diagnosticConfig.paddingRatio);
+    if (crop == null) return;
+    lastDiagnosticGalleryMs = now;
+    diagnosticSaver.saveGallerySnapshotAsync(
+        crop, diagnosticSession, "gallery_candidate_" + frameNum);
+    crop.recycle();
+  }
+
+  private static Detector.Recognition recognitionForTrack(TargetTrack track) {
+    return track == null || !track.isVisible() ? null : track.recognition;
+  }
+
+  private static Bitmap cropPerson(Bitmap frame, RectF bbox, float paddingRatio) {
+    if (frame == null || bbox == null) return null;
+    float padX = bbox.width() * paddingRatio;
+    float padY = bbox.height() * paddingRatio;
+    int left = clamp((int) (bbox.left - padX), 0, frame.getWidth() - 1);
+    int top = clamp((int) (bbox.top - padY), 0, frame.getHeight() - 1);
+    int right = clamp((int) (bbox.right + padX), left + 1, frame.getWidth());
+    int bottom = clamp((int) (bbox.bottom + padY), top + 1, frame.getHeight());
+    int width = right - left;
+    int height = bottom - top;
+    if (width <= 0 || height <= 0) return null;
+    try {
+      return Bitmap.createBitmap(frame, left, top, width, height);
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  private static int clamp(int value, int min, int max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
   private void updateDebugInfo(
       FollowState state,
       Control control,
       int persons,
       float fps,
-      ImageSetpointDistanceEstimator.DistanceEstimate dist) {
+      ImageSetpointDistanceEstimator.DistanceEstimate dist,
+      BehaviorDecisionResult behaviorDecision,
+      IdentityEvidence identityEvidence) {
     if (binding == null) return;
     float forward = (control.getLeft() + control.getRight()) / 2f;
     float turn = (control.getRight() - control.getLeft()) / 2f;
@@ -466,10 +770,36 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     } else {
       distLine = "dist=-";
     }
-    String info =
+    String behaviorLine;
+    if (behaviorDecision != null) {
+      behaviorLine =
+          String.format(
+              Locale.US,
+              "action=%s\nactionReason=%s\nsafetyBlock=%s\nactionConf=%.2f",
+              behaviorDecision.selectedAction.name(),
+              behaviorDecision.actionReason,
+              behaviorDecision.safetyBlockReason == null ? "-" : behaviorDecision.safetyBlockReason,
+              behaviorDecision.confidence);
+      if (behaviorDecision.traversabilityEvidence != null) {
+        TraversabilityEvidence trav = behaviorDecision.traversabilityEvidence;
+        behaviorLine +=
+            String.format(
+                Locale.US,
+                "\ncenterBlocked=%s\nfreeLCR=%.2f/%.2f/%.2f\ntravReason=%s",
+                trav.centerBlocked,
+                trav.leftFreeScore,
+                trav.centerFreeScore,
+                trav.rightFreeScore,
+                trav.reason);
+      }
+    } else {
+      behaviorLine = "action=-\nactionReason=-\nsafetyBlock=-\nactionConf=0.00";
+    }
+    String identityLine = buildIdentityDebugLine(identityEvidence);
+    String fullInfo =
         String.format(
             Locale.US,
-            "state=%s\nforward=%.2f\nturn=%.2f\nleft=%.2f\nright=%.2f\npersons=%d\nfps=%.1f\n%s",
+            "state=%s\nforward=%.2f\nturn=%.2f\nleft=%.2f\nright=%.2f\npersons=%d\nfps=%.1f\n%s\n%s\n%s",
             state.name(),
             forward,
             turn,
@@ -477,12 +807,160 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             control.getRight(),
             persons,
             fps,
-            distLine);
+            distLine,
+            behaviorLine,
+            identityLine);
+    String compactInfo =
+        String.format(
+            Locale.US,
+            "fps=%.1f\nstate=%s\naction=%s\npersons=%d\ntrack=%d locked=%d suspected=%d\nbelief=%.2f\nbest=%.3f margin=%.3f",
+            fps,
+            state.name(),
+            behaviorDecision == null ? "-" : behaviorDecision.selectedAction.name(),
+            persons,
+            identityEvidence == null ? -1 : identityEvidence.trackId,
+            identityEvidence == null ? -1 : identityEvidence.lockedTrackId,
+            identityEvidence == null ? -1 : identityEvidence.suspectedTrackId,
+            identityEvidence == null ? 0f : identityEvidence.targetBelief,
+            identityEvidence == null || identityEvidence.reidMatch == null
+                ? 0f
+                : identityEvidence.reidMatch.bestScore,
+            identityEvidence == null || identityEvidence.reidMatch == null
+                ? 0f
+                : identityEvidence.reidMatch.margin);
+    String info = showFullDebug ? fullInfo : compactInfo;
     requireActivity().runOnUiThread(() -> binding.debugInfo.setText(info));
+  }
+
+  private String buildIdentityDebugLine(IdentityEvidence identity) {
+    if (identity == null) {
+      return "reidAvailable=false\ngallerySize=0\nbestScore=0.000\nsecondScore=0.000\nmargin=0.000\nweak/mid/strong=false/false/false\nbboxDefault=false bboxStrict=false prediction=false\nstableMatchCount=0\ncandidateSwitchCount=0\nreidLatencyMs=0\nreidReason=-\nactiveTrackCount=0\ntrackId=-1 lockedTrackId=-1 suspectedTrackId=-1\ntrackAge=0 missedFrames=0\nbelief=0.00 beliefStable=0 beliefUncertain=0\nbeliefReason=-";
+    }
+    ReIDMatchResult reid = identity.reidMatch;
+    BboxContinuityEvidence bbox = identity.bboxContinuity;
+    boolean reidAvailable = reid != null && reid.reidAvailable;
+    int gallerySize = reid == null ? 0 : reid.gallerySize;
+    float best = reid == null ? 0f : reid.bestScore;
+    float second = reid == null ? 0f : reid.secondScore;
+    float margin = reid == null ? 0f : reid.margin;
+    long latency = reid == null ? 0L : reid.latencyMs;
+    String reason = reid == null ? identity.reason : reid.reason;
+    return String.format(
+        Locale.US,
+        "reidAvailable=%s\ngallerySize=%d\nbestScore=%.3f\nsecondScore=%.3f\nmargin=%.3f\nweak/mid/strong=%s/%s/%s\nbboxDefault=%s bboxStrict=%s prediction=%s\nstableMatchCount=%d\ncandidateSwitchCount=%d\nreidLatencyMs=%d\nreidReason=%s\nactiveTrackCount=%d\ntrackId=%d lockedTrackId=%d suspectedTrackId=%d\ntrackAge=%d missedFrames=%d\nbelief=%.2f reidC=%.2f bboxC=%.2f predC=%.2f switchP=%.2f\nbeliefStable=%d beliefUncertain=%d\nbeliefReason=%s",
+        reidAvailable,
+        gallerySize,
+        best,
+        second,
+        margin,
+        identity.weakOk(),
+        identity.midOk(),
+        identity.strongOk(),
+        bbox != null && bbox.bboxDefaultOk,
+        bbox != null && bbox.bboxStrictOk,
+        bbox != null && bbox.predictionOk,
+        identity.stableMatchCount,
+        identity.candidateSwitchCount,
+        latency,
+        reason == null ? "-" : reason,
+        identity.activeTrackCount,
+        identity.trackId,
+        identity.lockedTrackId,
+        identity.suspectedTrackId,
+        identity.trackAge,
+        identity.missedFrames,
+        identity.targetBelief,
+        identity.reidContribution,
+        identity.bboxContribution,
+        identity.predictionContribution,
+        identity.switchPenalty,
+        identity.beliefStableFrames,
+        identity.beliefUncertainFrames,
+        identity.beliefReason == null ? "-" : identity.beliefReason);
+  }
+
+  private BehaviorDecisionResult decideBehavior(
+      FollowStateMachine.FrameResult fr, int frameW, int frameH) {
+    IdentityEvidence identity =
+        fr.identityEvidence != null
+            ? fr.identityEvidence
+            : new IdentityEvidence(
+                fr.matched ? fr.matchScore : 0f,
+                fr.matchScore,
+                fr.matched,
+                fr.matched ? "matched" : "not_matched");
+    DistanceEvidence distance;
+    if (fr.distanceEstimate != null) {
+      distance =
+          new DistanceEvidence(
+              fr.distanceEstimate.state,
+              fr.distanceEstimate.confidence,
+              fr.distanceEstimate.failureReason);
+    } else {
+      distance = new DistanceEvidence(DistanceState.UNKNOWN, 0f, "distance_not_available");
+    }
+    TraversabilityEvidence traversability = estimateTraversability(fr, frameW, frameH);
+    SystemSafetyEvidence safety =
+        new SystemSafetyEvidence(
+            false, true, detector != null, detector == null ? "detector_not_ready" : "ok");
+    BehaviorDecisionResult decision =
+        actionArbitrator.decide(
+            fr.state, identity, distance, traversability, safety, stateMachine.getMemory(), frameW);
+    return new BehaviorDecisionResult(
+        decision.state,
+        decision.selectedAction,
+        decision.actionReason,
+        decision.safetyBlockReason,
+        decision.confidence,
+        distance,
+        traversability);
+  }
+
+  private TraversabilityEvidence estimateTraversability(
+      FollowStateMachine.FrameResult fr, int frameW, int frameH) {
+    if (fr == null || fr.persons == null || frameW <= 0 || frameH <= 0) {
+      return new TraversabilityEvidence(1f, 1f, 1f, false, "default_clear");
+    }
+    boolean centerBlocked = false;
+    float centerFreeScore = 1f;
+    for (Detector.Recognition person : fr.persons) {
+      if (person == null || person == fr.target || person.getLocation() == null) continue;
+      RectF b = person.getLocation();
+      float cxRatio = b.centerX() / frameW;
+      boolean inCenter = cxRatio >= 0.33f && cxRatio <= 0.67f;
+      boolean lowerBodyRisk = b.bottom >= frameH * 0.55f;
+      boolean largeEnough = b.width() * b.height() >= frameW * frameH * 0.03f;
+      if (inCenter && lowerBodyRisk && largeEnough) {
+        centerBlocked = true;
+        centerFreeScore = Math.min(centerFreeScore, 0.2f);
+      }
+    }
+    return new TraversabilityEvidence(
+        1f,
+        centerFreeScore,
+        1f,
+        centerBlocked,
+        centerBlocked ? "non_target_in_center_corridor" : "default_clear");
   }
 
   protected Model getModel() {
     return model;
+  }
+
+  private static Detector.Recognition selectLargest(List<Detector.Recognition> persons) {
+    Detector.Recognition target = null;
+    float maxArea = -1f;
+    if (persons == null) return null;
+    for (Detector.Recognition r : persons) {
+      if (r == null || r.getLocation() == null) continue;
+      RectF loc = r.getLocation();
+      float area = loc.width() * loc.height();
+      if (area > maxArea) {
+        maxArea = area;
+        target = r;
+      }
+    }
+    return target;
   }
 
   @Override
@@ -505,10 +983,12 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private static class DrawBox {
     final RectF location;
     final int colorType;
+    final String label;
 
-    DrawBox(RectF location, int colorType) {
+    DrawBox(RectF location, int colorType, String label) {
       this.location = location;
       this.colorType = colorType;
+      this.label = label;
     }
   }
 }
