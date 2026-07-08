@@ -3,7 +3,7 @@
 > 所属项目：自主跟随购物车原型
 > 代码位置：`dev/OpenBot/android/robot/src/main/java/org/openbot/cartfollow/`
 > 开发分支：`feature/human-cart-simulator`（Phase 1）/ `feature/distance-control`（Phase 2）/ `feature/person-crop-collector`（Phase 3 起）
-> 最后更新：2026-07-07
+> 最后更新：2026-07-08
 
 ---
 
@@ -13,19 +13,20 @@ Human Cart Simulator 是购物车跟随功能的上位机核心模块，在 Open
 
 ### 文件清单
 
-| 文件 | 行数 | 作用 |
-|------|------|------|
-| `HumanCartSimulatorFragment.java` | 464 | 主 UI Fragment：摄像头预览 + 检测框绘制 + 确认/重拍/取消 + 倒计时 + 距离调试显示 |
-| `ControlGenerator.java` | 110 | 控制算法：基于 DistanceState 决定 forward，转向由 xError 决定 |
-| `FollowStateMachine.java` | 262 | 完整状态机：管理两阶段目标初始化、重识别、倒计时、跟随、丢失、搜索、停止 |
-| `FollowState.java` | 14 | 状态机枚举：`IDLE / CAPTURE_TARGET / LOCKED_PENDING_CONFIRM / CONFIRMED_ARMED / REACQUIRE_TARGET / READY_TO_FOLLOW / FOLLOW / LOST / SEARCH / STOP` |
-| `DistanceState.java` | 7 | 距离状态枚举：`TOO_FAR / OK / TOO_CLOSE / UNKNOWN` |
-| `ImageSetpointDistanceEstimator.java` | 112 | 图像伺服距离估计器：基于初始化 setpoint 输出 height_scale / area_scale / bottom_shift / state / confidence |
-| `TargetMemory.java` | 167 | 目标记忆：confirmedBbox、面积、上下身 HSV 颜色直方图、动态位置、距离 setpoint |
-| `TargetMatcher.java` | 79 | 目标匹配：position + size + color + confidence 融合评分（ReID 接口预留） |
-| `ReIDFeatureExtractor.java` | 5 | ReID 接口占位，尚未接入真实 embedding 推理 |
-| `HumanCommandInterpreter.java` | 52 | 中文指令解释器：支持 DistanceState 重载，输出距离感知指令 |
-| `fragment_human_cart_simulator.xml` | 218 | 布局文件：OverlayView + 指令文本 + 快照确认面板 + 倒计时 + 调试信息 + 底部面板 |
+| 文件 | 作用 |
+|------|------|
+| `HumanCartSimulatorFragment.java` | 主 UI Fragment：摄像头预览、检测框绘制、目标确认、ReID 调度、行为决策 debug 与人类指令显示 |
+| `FollowStateMachine.java` / `FollowState.java` | 管理初始化、确认、重捕获、跟随、谨慎跟随、身份不确定、搜索与停止 |
+| `ActionArbitrator.java` / `BehaviorAction.java` / `BehaviorDecisionResult.java` | 阶段 A 行为层：将状态与证据映射为 `FOLLOW_SLOW / MOTION_STOP / LOCAL_SEARCH / BLOCKED_WAIT` 等动作 |
+| `IdentityEvidence.java` / `DistanceEvidence.java` / `TraversabilityEvidence.java` / `SystemSafetyEvidence.java` | 统一证据结构，供 ActionArbitrator 和 debug 面板使用 |
+| `ControlGenerator.java` | 控制算法：基于 DistanceState 决定 forward，转向由 xError 决定；当前仍只用于模拟提示，不直接控制底盘 |
+| `DistanceState.java` / `ImageSetpointDistanceEstimator.java` | 初始化标定 + 图像伺服距离估计，输出 `TOO_FAR / OK / TOO_CLOSE / UNKNOWN` |
+| `TargetMemory.java` | 目标记忆：confirmed bbox、颜色特征、距离 setpoint、previous/last bbox 和 ReID gallery |
+| `TargetMatcher.java` | legacy 目标匹配：position + size + color + confidence，用于 ReID 不可用时的保守降级 |
+| `ReIDFeatureExtractor.java` / `TfliteReIDFeatureExtractor.java` | ReID 抽象接口与 TFLite 推理实现，当前本地测试模型为 `osnet_x0_25_market1501.tflite` |
+| `ReIDCoordinator.java` / `ReIDMatchResult.java` / `BboxContinuityEvidence.java` | 管理 ReID gallery、候选人推理、best/second/margin、bbox 连续性与推理耗时 |
+| `HumanCommandInterpreter.java` | 将状态、距离和行为动作转换为 Human Cart Simulator 的中文动作提示 |
+| `fragment_human_cart_simulator.xml` | 布局文件：OverlayView、指令文本、快照确认面板、倒计时、调试信息和底部面板 |
 
 ### 集成点（在 OpenBot App 中的入口）
 
@@ -83,6 +84,9 @@ Human Cart Simulator 是购物车跟随功能的上位机核心模块，在 Open
 | 导航集成 | 已完成 | 已注册到主菜单 "Cart Simulator" 入口 |
 | **Person Crop Collector** | 已完成（Phase 3 前置） | 已注册到主菜单，可采集真实 OpenBot person bbox crop、`session_info.json` 与 `metadata.csv` |
 | **真实 crop 数据 PC 端 ReID 复测** | 已完成首轮 | 基于 `images_openbot_clean`、`osnet_x0_25_market1501.pth`、`diverse gallery` 完成 pairwise / gallery-probe / target-follow 模拟 |
+| **Person Sequence Collector** | 已完成 | 可采集无人帧、多人检测、bbox、crop 和人工事件，用于 PC sequence replay |
+| **阶段 A 行为层** | 已完成并通过手机体验 | `Evidence -> BehaviorDecisionResult -> BehaviorAction -> HumanCommand` 已接入 Human Cart Simulator |
+| **阶段 B Android ReID** | 已完成首版并通过手机运行 | TFLite ReID 可运行，debug 字段正常，实机约 30 FPS；仍需阶段 C 轨迹与身份信念层抑制跟错人 |
 
 ### 2.2 Phase 3 首轮 ReID 实验结果（2026-07-06）
 
@@ -173,7 +177,7 @@ ReID margin 可作为身份置信证据，但不能单独恢复 FOLLOW。
 | 功能 | 优先级 | 说明 |
 |------|--------|------|
 | **`vehicle.setControl()` 集成** | 中（阶段6） | 当前 Control 仅显示在 UI 上，未实际发送给底盘。硬件联调阶段在 `processFrame()` 中调用 `vehicle.setControl()` |
-| **目标重锁定增强** | 高 | 当前 LOST/SEARCH 恢复复用 TargetMatcher，尚未接入 Android 端 ReID embedding 与多线索融合。阶段3 继续处理 |
+| **目标轨迹与身份信念层** | 高 | ReID 已接入并能运行，但目标离开/返回和干扰者场景仍可能跟错或恢复过慢；下一阶段需要 `TargetTrackManager + IdentityBeliefAccumulator` |
 | **参数持久化** | 低 | 当前调参仅内存生效，重启恢复默认 |
 | **参数 UI 面板** | 低 | K_TURN / MAX_FORWARD / 阈值等参数需通过代码修改，没有 UI 界面 |
 | **bottomShift 参与判态** | 低 | 当前 bottomShift 仅用于显示，未参与距离状态判断。待 90° 旋转下方向实测验证后决定是否纳入 |
@@ -250,21 +254,37 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 
 - [x] 新增 Person Crop Collector，从 OpenBot Android 导出真实 person bbox crop
 - [x] PC 端验证 confirmedGallery / reid_score / reid_margin（首轮基于 `osnet_x0_25 + diverse gallery-k=8`）
-- [ ] Android 端部署 osnet_x0_25（ONNX Runtime Mobile 主线）
-- [ ] 将 ReID 输出接入 `TargetMemory / TargetMatcher / FollowStateMachine`
-- [ ] 多人/遮挡/重现场景验证，并特别验证目标缺席时的 false accept 抑制
+- [x] Android 端部署 `osnet_x0_25` TFLite 首版，Human Cart Simulator 中 `reidAvailable=true`
+- [x] 将 ReID 输出接入 `IdentityEvidence / FollowStateMachine / ActionArbitrator`
+- [x] 多人、目标离开、目标返回、遮挡场景完成首轮手机观察
+- [ ] 用阶段 C 的 track/belief 层继续降低跟错人风险，提高目标返回后的恢复速度
 
-### Phase 4：单目深度辅助
+### Phase 4：目标轨迹与身份信念层（当前下一步）
 
-- [ ] MiDaS / Depth Anything Android 部署调研
-- [ ] 作为距离/障碍风险辅助，不替代安全状态机
+- [ ] 新增轻量 `TargetTrackManager`，用 bbox IoU / center distance / area ratio 维护短时 trackId
+- [ ] 新增 `IdentityBeliefAccumulator`，对每个 track 累计 targetBelief
+- [ ] locked target 不因干扰者单帧 ReID 高分被抢走
+- [ ] 目标返回后通过 suspected track + 多帧 belief 稳定恢复到 `REACQUIRE_TARGET / FOLLOW_CAUTION`
+- [ ] debug 面板显示 `trackId / lockedTrackId / targetBelief / trackAge / missedFrames / beliefReason`
 
-### Phase 5：局部可通行空间与跟随式避障
+### Phase 5：距离控制继续收敛
+
+- [x] 初始化距离标定 + 图像伺服首版已完成
+- [ ] 结合阶段 C 的稳定目标 track 重新验证 `TOO_FAR / OK / TOO_CLOSE`
+- [ ] 评估 bottomShift 是否纳入距离状态判断
+
+### Phase 6：局部可通行空间与跟随式避障
 
 - [ ] LEFT / CENTER / RIGHT 三方向 free score
 - [ ] 候选动作 SLOW_FORWARD / LEFT_ARC / RIGHT_ARC / BLOCKED_WAIT
 
-### Phase 6：硬件联调
+### Phase 7：性能评估与增强开关
+
+- [ ] 记录 detector、ReID、track/belief、ActionArbitrator 耗时
+- [ ] 根据手机性能决定是否提高 ReID 频率
+- [ ] 评估 MiDaS / Depth Anything Android 部署，只作为距离/障碍风险增强
+
+### Phase 8：硬件联调
 
 - [ ] 接通 `vehicle.setControl()` 到底盘
 - [ ] 真实车速/转向半径/延迟标定
@@ -288,7 +308,9 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 | `6d9aa5f` | 2026-07-06 | Add capture controls and status panel |
 | `765eb82` | 2026-07-06 | Put Person ID input on its own row for tap accessibility |
 | `771345e` | 2026-07-06 | Rotate crop by sensorOrientation before saving to disk |
-| pending | 2026-07-07 | Add PersonSequenceCollector for continuous sequence data collection |
+| recorded | 2026-07-07 | Add PersonSequenceCollector for continuous sequence data collection |
+| recorded | 2026-07-08 | Add phase A behavior decision layer and Human Cart Simulator action debug |
+| recorded | 2026-07-08 | Add phase B TFLite ReID evidence path for Human Cart Simulator |
 
 ---
 
