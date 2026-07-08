@@ -75,7 +75,9 @@ public class CartFollowDiagnosticSession {
       String detectorModelName,
       float minConfidence,
       boolean reidAvailable,
-      int gallerySize) {
+      int gallerySize,
+      boolean reidCropUpright,
+      int sensorOrientation) {
     JSONObject json = new JSONObject();
     try {
       json.put("session_id", sessionId);
@@ -94,6 +96,8 @@ public class CartFollowDiagnosticSession {
       json.put("min_confidence", minConfidence);
       json.put("reid_available", reidAvailable);
       json.put("gallery_size", gallerySize);
+      json.put("reid_crop_upright", reidCropUpright);
+      json.put("sensor_orientation", sensorOrientation);
       json.put("device_model", Build.MODEL == null ? "" : Build.MODEL);
       json.put("sdk_int", Build.VERSION.SDK_INT);
     } catch (JSONException e) {

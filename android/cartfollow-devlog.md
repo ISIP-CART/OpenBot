@@ -762,3 +762,44 @@ $env:Path="$env:JAVA_HOME\bin;$env:Path"
 5. 默认左上角不再显示大块完整 debug；点击 `调试详情` 后可展开完整字段。
 6. Stop / Cancel / Retake / 页面暂停后，诊断 session 应关闭，按钮禁用并复位。
 7. 导出诊断目录后，应能用 `events.csv` 附近的 `frame_log.csv` 和 `identity_log.csv` 判断黄框不转绿或非目标转绿的原因。
+
+---
+
+## 13. Phase C ReID 输入方向修正（2026-07-08）
+
+### 13.1 修正原因
+
+PC 侧 `cartfollow_diagnostics` 复盘发现，旧版诊断 gallery 全部被标记为 `landscape_or_rotated`。代码检查确认旧版 `ReIDCoordinator` 直接在原始 `workingFrame` 上按 bbox 裁剪，并立即送入 `TfliteReIDFeatureExtractor`，没有按 `sensorOrientation` 将 person crop 转正。
+
+这意味着旧版 Android ReID 虽然可以运行并输出分数，但 gallery 与候选 crop 都可能以横向姿态进入模型，影响目标返回和多人干扰场景下的稳定性。
+
+### 13.2 本轮代码变化
+
+- `ReIDCoordinator.collectInitializationCandidate()` 增加 `sensorOrientation` 参数，gallery candidate crop 裁剪后旋转为 upright 再提取 embedding。
+- `ReIDCoordinator.evaluate()` 和内部 ReID candidate 推理同样使用 upright crop。
+- `HumanCartSimulatorFragment` 调用 ReIDCoordinator 时传入当前 `sensorOrientation`。
+- 诊断 `gallery/` 中保存的初始化候选 crop 改为 upright 版本。
+- `session_info.json` 写入 `reid_crop_upright=true` 和 `sensor_orientation`。
+- debug 简洁面板和完整面板增加 `reidCrop=upright`，用于实机确认新版路径已生效。
+
+本轮没有修改 ReID 阈值、belief 阈值、bbox gate、状态机恢复规则或真实底盘控制路径。
+
+### 13.3 构建验证
+
+构建命令：
+
+```powershell
+$env:JAVA_HOME='D:\Java\jdk-17'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过。构建日志仍有既有 TensorFlow Lite manifest namespace warning、Kotlin/Javac target warning 和 deprecated Gradle warning，均未阻塞构建。
+
+### 13.4 下一轮手机验收重点
+
+1. Human Cart Simulator debug 应显示 `reidCrop=upright`。
+2. 新采集的 `session_info.json` 应包含 `reid_crop_upright=true`。
+3. 新采集的 `gallery/` 不应再全部被 PC 分析脚本标记为 `landscape_or_rotated`。
+4. 对比旧数据，观察 `target_return` 后 `frames_to_reacquire / frames_to_follow` 是否缩短。
+5. 若 upright crop 后仍大量出现 `belief_high_bbox_failed`，下一轮再处理分状态 bbox gate 和 recoverable stop。
