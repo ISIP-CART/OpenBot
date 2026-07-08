@@ -803,3 +803,83 @@ $env:Path="$env:JAVA_HOME\bin;$env:Path"
 3. 新采集的 `gallery/` 不应再全部被 PC 分析脚本标记为 `landscape_or_rotated`。
 4. 对比旧数据，观察 `target_return` 后 `frames_to_reacquire / frames_to_follow` 是否缩短。
 5. 若 upright crop 后仍大量出现 `belief_high_bbox_failed`，下一轮再处理分状态 bbox gate 和 recoverable stop。
+
+---
+
+## 14. Phase C 新旧诊断数据对比结论（2026-07-08）
+
+### 14.1 分析输入
+
+本轮没有继续改 Android 策略，而是先对新旧 `cartfollow_diagnostics` 做 PC 离线对比：
+
+```text
+old: tools/reid_pc_test/images/cartfollow_diagnostics_old/
+new: tools/reid_pc_test/images/cartfollow_diagnostics/
+```
+
+新版数据来自 ReID crop upright 修正后的 APK，`session_info.json` 中应出现：
+
+```text
+reid_crop_upright=true
+sensor_orientation=90
+```
+
+PC 分析命令：
+
+```powershell
+cd tools/reid_pc_test
+python analyze_cartfollow_diagnostics_v1.py ^
+  --compare-roots old=images/cartfollow_diagnostics_old,new=images/cartfollow_diagnostics ^
+  --output outputs/cartfollow_diagnostics_analysis/compare
+```
+
+### 14.2 对比结果
+
+| 数据 | sessions | target_return | recovered_rate | recovered_fast | recovered_slow | not_recovered | hard_stop | best_mean | margin_mean | bbox_default_rate | gallery_candidate_landscape_rate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| old | 4 | 11 | 0.5455 | 5 | 1 | 3 | 2 | 0.5017 | 0.3431 | 0.4451 | 1.0000 |
+| new | 2 | 16 | 0.8750 | 11 | 3 | 2 | 0 | 0.5992 | 0.4611 | 0.5485 | 0.0000 |
+
+结论：
+
+- upright crop 修正确实生效：新版 `gallery_candidate_landscape_rate=0.0000`。
+- ReID 分数整体提高：`best_mean` 和 `margin_mean` 都高于旧版。
+- `target_return` 后恢复率提升，且新版暂未出现 `hard_stop_before_return`。
+- 这轮结果说明 ReID 输入方向已不是主要问题。
+
+### 14.3 当前剩余问题
+
+新版主要 blocker：
+
+```text
+candidate_switch_penalty: 15
+belief_high_bbox_failed: 10
+```
+
+含义：
+
+- `candidate_switch_penalty` 说明目标返回或多人干扰时，suspected track 仍容易切换，trackId / lockedTrackId 保护还不够稳。
+- `belief_high_bbox_failed` 说明 ReID / belief 已经有较强证据，但 bbox default/strict gate 不通过，导致黄框迟迟不能转绿。
+
+因此下一轮 Android 工作不应继续优先调 ReID 模型、TFLite 性能或 `bestScore / margin` 阈值，而应聚焦：
+
+1. `TargetTrackManager` 的 track association 稳定性。
+2. locked track 的保留与 suspected track 升级规则。
+3. `FOLLOW` 与 `REACQUIRE/IDENTITY_UNCERTAIN/SEARCH` 使用不同 bbox gate。
+4. recoverable stop 与 hard `STOP` 的边界。
+
+### 14.4 下一轮验收口径
+
+下一轮策略改动后继续采集 `cartfollow_diagnostics`，重点比较：
+
+```text
+recovered_rate
+mean_ms_to_follow
+not_recovered_in_window
+candidate_switch_penalty
+belief_high_bbox_failed
+非目标转绿是否增加
+gallery_candidate_landscape_rate 是否保持 0
+```
+
+如果 `candidate_switch_penalty` 和 `belief_high_bbox_failed` 下降，同时非目标转绿不增加，才说明策略改动真正改善了“目标返回后迟迟不转绿”和“干扰者偶发转绿”两个问题。
