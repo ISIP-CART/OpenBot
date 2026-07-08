@@ -445,3 +445,42 @@ STOP
 - 采集目录导出到 PC 后，用 `tools/reid_pc_test/prepare_openbot_crops_dataset.py` 整理为 `images_openbot_clean/`
 - 主菜单 → "Person Sequence Collector" 进入连续时序采集页
 - Sequence 采集时事件按钮只需在事件开始/结束时各按一次，PC replay 会用容忍窗口处理人工反应延迟
+
+---
+
+## 9. Phase B：ReID 身份证据接入与安全重捕获闭环（2026-07-08）
+
+本阶段根据 Human Cart Simulator 阶段 A 的手机验收反馈推进：阶段 A 的行为层基本可用，但目标重新进入、干扰者进入等场景仍可能因为旧 `TargetMatcher` 单帧匹配而出现“跟错人”。因此 Phase B 的首要目标是切断 `LOST / SEARCH -> FOLLOW` 的单帧恢复路径，并把 ReID 作为身份置信度证据接入状态机。
+
+已完成代码改动：
+
+- 新增 `ReIDMatchResult`、`BboxContinuityEvidence`、`TfliteReIDFeatureExtractor`、`ReIDCoordinator`。
+- `FollowState` 新增 `FOLLOW_CAUTION` 与 `IDENTITY_UNCERTAIN`。
+- `TargetMemory` 增加 previous bbox 记录，用于 bbox 连续性和简单 prediction 计算。
+- `IdentityEvidence` 扩展为同时携带 legacy score、ReID score / margin、bbox gate、稳定帧数和候选切换次数。
+- `FollowStateMachine` 改为支持外部 `IdentityEvidence` 输入；`LOST / SEARCH` 不再允许单帧匹配直接恢复 `FOLLOW`，而是先进入 `REACQUIRE_TARGET`，再经多帧稳定证据恢复。
+- `ActionArbitrator` 增加 `IDENTITY_UNCERTAIN` 和 `FOLLOW_CAUTION` 的动作解释。
+- `HumanCartSimulatorFragment` 接入 `ReIDCoordinator`，在 debug 面板显示 `reidAvailable / gallerySize / bestScore / secondScore / margin / weak-mid-strong / bboxDefault-bboxStrict-prediction / stableMatchCount / candidateSwitchCount / reidLatencyMs / reidReason`。
+
+TFLite 路线说明：
+
+- 首版复用当前工程已有 TensorFlow Lite 2.4，不新增 ONNX Runtime 依赖。
+- 默认模型路径为 `assets/networks/reid/osnet_x0_25_market1501.tflite`。
+- 该模型文件属于本地测试资产，`.gitignore` 已忽略 `*.tflite`，默认不提交。
+- 如果模型不存在或加载失败，App 不崩溃，debug 显示 `reidAvailable=false`，状态机退回更保守的 bbox / color / motion 逻辑。
+
+构建验证：
+
+```powershell
+$env:JAVA_HOME='D:\Java\jdk-17'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过，生成 `robot/build/outputs/apk/debug/robot-debug.apk`。当前本机输出过 Android SDK XML version warning，但未影响构建结果。
+
+后续手机验收重点：
+
+- 无 ReID 模型时：Human Cart Simulator 应正常打开，debug 显示 `reidAvailable=false`，目标丢失后不应单帧恢复 `FOLLOW`。
+- 放入 TFLite 模型后：确认目标后 `gallerySize` 应逐步达到 8 或实际可用数量；多人、目标离开、目标返回、遮挡场景下观察 `bestScore / margin / stableMatchCount` 是否符合预期。
+- 目标返回时允许 `IDENTITY_UNCERTAIN -> REACQUIRE_TARGET -> FOLLOW`，但不允许单帧高分直接恢复 `FOLLOW`。

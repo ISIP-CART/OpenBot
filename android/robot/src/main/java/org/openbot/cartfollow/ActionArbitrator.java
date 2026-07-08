@@ -25,6 +25,10 @@ public class ActionArbitrator {
       float conf = identity == null ? 0f : identity.confidence;
       return result(state, BehaviorAction.REACQUIRE_HOLD, "reacquire_confirming", null, conf);
     }
+    if (state == FollowState.IDENTITY_UNCERTAIN) {
+      float conf = identity == null ? 0f : identity.confidence;
+      return result(state, BehaviorAction.MOTION_STOP, "identity_uncertain", "motion_stop", conf);
+    }
     if (state == FollowState.LOCKED_PENDING_CONFIRM
         || state == FollowState.CONFIRMED_ARMED
         || state == FollowState.READY_TO_FOLLOW
@@ -54,11 +58,13 @@ public class ActionArbitrator {
           distance.reason,
           distance.confidence);
     }
-    if (state == FollowState.FOLLOW && distance != null && distance.state == DistanceState.OK) {
+    if ((state == FollowState.FOLLOW || state == FollowState.FOLLOW_CAUTION)
+        && distance != null
+        && distance.state == DistanceState.OK) {
       return result(
           state,
           BehaviorAction.FOLLOW_CAUTION,
-          "identity_ok_distance_ok",
+          state == FollowState.FOLLOW_CAUTION ? "follow_caution_distance_ok" : "identity_ok_distance_ok",
           null,
           identityConfidence(identity));
     }

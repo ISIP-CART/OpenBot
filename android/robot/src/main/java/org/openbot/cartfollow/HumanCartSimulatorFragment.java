@@ -69,6 +69,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private final FollowStateMachine stateMachine =
       new FollowStateMachine(matcher, controlGenerator);
   private final ActionArbitrator actionArbitrator = new ActionArbitrator();
+  private ReIDCoordinator reidCoordinator;
 
   private final List<DrawBox> drawBoxes = new ArrayList<>();
   private int drawFrameWidth = 0;
@@ -110,6 +111,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   @Override
   public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
     super.onViewCreated(view, savedInstanceState);
+    reidCoordinator = new ReIDCoordinator(requireActivity(), getNumThreads());
 
     binding.confidenceValue.setText((int) (minConfidence * 100) + "%");
     binding.plusConfidence.setOnClickListener(
@@ -138,18 +140,32 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
     binding.trackingOverlay.addCallback(canvas -> drawOverlay(canvas));
 
-    binding.btnConfirm.setOnClickListener(v -> stateMachine.confirm());
-    binding.btnRetake.setOnClickListener(v -> stateMachine.retake());
-    binding.btnCancel.setOnClickListener(v -> stateMachine.cancel());
+    binding.btnConfirm.setOnClickListener(
+        v -> {
+          if (reidCoordinator != null) reidCoordinator.confirmGallery();
+          stateMachine.confirm();
+        });
+    binding.btnRetake.setOnClickListener(
+        v -> {
+          if (reidCoordinator != null) reidCoordinator.reset();
+          stateMachine.retake();
+        });
+    binding.btnCancel.setOnClickListener(
+        v -> {
+          if (reidCoordinator != null) reidCoordinator.reset();
+          stateMachine.cancel();
+        });
 
     binding.startSwitch.setChecked(false);
     binding.startSwitch.setOnClickListener(
         v -> {
           if (binding.startSwitch.isChecked()) {
             binding.modelSpinner.setEnabled(false);
+            if (reidCoordinator != null) reidCoordinator.reset();
             stateMachine.startCapture();
           } else {
             binding.modelSpinner.setEnabled(true);
+            if (reidCoordinator != null) reidCoordinator.reset();
             stateMachine.cancel();
             resetUiToIdle();
           }
@@ -158,7 +174,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private void resetUiToIdle() {
     updateCommandText(getString(R.string.cart_sim_idle));
-    updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f, null, null);
+    updateDebugInfo(FollowState.IDLE, new Control(0f, 0f), 0, 0f, null, null, null);
     if (binding != null) {
       binding.confirmPanel.setVisibility(View.GONE);
       binding.countdownText.setVisibility(View.GONE);
@@ -300,16 +316,43 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
             int frameW = getMaxAnalyseImageSize().getWidth();
             int frameH = getMaxAnalyseImageSize().getHeight();
+            FollowState currentState = stateMachine.getState();
+            if (currentState == FollowState.CAPTURE_TARGET && reidCoordinator != null) {
+              reidCoordinator.collectInitializationCandidate(
+                  workingFrame, selectLargest(mappedRecognitions));
+            }
+            TargetMatcher.MatchResult legacyMatch =
+                matcher.match(
+                    mappedRecognitions, workingFrame, stateMachine.getMemory(), frameW, frameH);
+            IdentityEvidence identity =
+                reidCoordinator == null
+                    ? null
+                    : reidCoordinator.evaluate(
+                        mappedRecognitions,
+                        workingFrame,
+                        stateMachine.getMemory(),
+                        currentState,
+                        frameW,
+                        frameH,
+                        legacyMatch.score,
+                        legacyMatch.matched,
+                        legacyMatch.best);
             FollowStateMachine.FrameResult fr =
                 stateMachine.onFrame(
-                    mappedRecognitions, workingFrame, frameW, frameH, sensorOrientation);
+                    mappedRecognitions, workingFrame, frameW, frameH, sensorOrientation, identity);
             fr.behaviorDecision = decideBehavior(fr, frameW, frameH);
 
             updateDrawState(fr, frameW, frameH, sensorOrientation);
             updateCommandText(commandForState(fr));
             float fps = lastProcessingTimeMs > 0 ? 1000f / lastProcessingTimeMs : 0f;
             updateDebugInfo(
-                fr.state, fr.control, fr.persons.size(), fps, fr.distanceEstimate, fr.behaviorDecision);
+                fr.state,
+                fr.control,
+                fr.persons.size(),
+                fps,
+                fr.distanceEstimate,
+                fr.behaviorDecision,
+                fr.identityEvidence);
             updateUiForState(fr);
             binding.trackingOverlay.postInvalidate();
           }
@@ -426,10 +469,13 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       case READY_TO_FOLLOW:
         return fr.countdownSec >= 0 ? fr.countdownSec + " 秒后启动" : "准备启动";
       case FOLLOW:
+      case FOLLOW_CAUTION:
         if (fr.distanceEstimate != null) {
           return interpreter.interpret(fr.control, fr.state, fr.distanceEstimate.state);
         }
         return interpreter.interpret(fr.control, fr.state, fr.tooClose);
+      case IDENTITY_UNCERTAIN:
+        return "身份不确定，请停止";
       case LOST:
         return "目标丢失，请停止";
       case SEARCH:
@@ -472,7 +518,8 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       int persons,
       float fps,
       ImageSetpointDistanceEstimator.DistanceEstimate dist,
-      BehaviorDecisionResult behaviorDecision) {
+      BehaviorDecisionResult behaviorDecision,
+      IdentityEvidence identityEvidence) {
     if (binding == null) return;
     float forward = (control.getLeft() + control.getRight()) / 2f;
     float turn = (control.getRight() - control.getLeft()) / 2f;
@@ -515,10 +562,11 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     } else {
       behaviorLine = "action=-\nactionReason=-\nsafetyBlock=-\nactionConf=0.00";
     }
+    String identityLine = buildIdentityDebugLine(identityEvidence);
     String info =
         String.format(
             Locale.US,
-            "state=%s\nforward=%.2f\nturn=%.2f\nleft=%.2f\nright=%.2f\npersons=%d\nfps=%.1f\n%s\n%s",
+            "state=%s\nforward=%.2f\nturn=%.2f\nleft=%.2f\nright=%.2f\npersons=%d\nfps=%.1f\n%s\n%s\n%s",
             state.name(),
             forward,
             turn,
@@ -527,18 +575,54 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             persons,
             fps,
             distLine,
-            behaviorLine);
+            behaviorLine,
+            identityLine);
     requireActivity().runOnUiThread(() -> binding.debugInfo.setText(info));
+  }
+
+  private String buildIdentityDebugLine(IdentityEvidence identity) {
+    if (identity == null) {
+      return "reidAvailable=false\ngallerySize=0\nbestScore=0.000\nsecondScore=0.000\nmargin=0.000\nweak/mid/strong=false/false/false\nbboxDefault=false bboxStrict=false prediction=false\nstableMatchCount=0\ncandidateSwitchCount=0\nreidLatencyMs=0\nreidReason=-";
+    }
+    ReIDMatchResult reid = identity.reidMatch;
+    BboxContinuityEvidence bbox = identity.bboxContinuity;
+    boolean reidAvailable = reid != null && reid.reidAvailable;
+    int gallerySize = reid == null ? 0 : reid.gallerySize;
+    float best = reid == null ? 0f : reid.bestScore;
+    float second = reid == null ? 0f : reid.secondScore;
+    float margin = reid == null ? 0f : reid.margin;
+    long latency = reid == null ? 0L : reid.latencyMs;
+    String reason = reid == null ? identity.reason : reid.reason;
+    return String.format(
+        Locale.US,
+        "reidAvailable=%s\ngallerySize=%d\nbestScore=%.3f\nsecondScore=%.3f\nmargin=%.3f\nweak/mid/strong=%s/%s/%s\nbboxDefault=%s bboxStrict=%s prediction=%s\nstableMatchCount=%d\ncandidateSwitchCount=%d\nreidLatencyMs=%d\nreidReason=%s",
+        reidAvailable,
+        gallerySize,
+        best,
+        second,
+        margin,
+        identity.weakOk(),
+        identity.midOk(),
+        identity.strongOk(),
+        bbox != null && bbox.bboxDefaultOk,
+        bbox != null && bbox.bboxStrictOk,
+        bbox != null && bbox.predictionOk,
+        identity.stableMatchCount,
+        identity.candidateSwitchCount,
+        latency,
+        reason == null ? "-" : reason);
   }
 
   private BehaviorDecisionResult decideBehavior(
       FollowStateMachine.FrameResult fr, int frameW, int frameH) {
     IdentityEvidence identity =
-        new IdentityEvidence(
-            fr.matched ? fr.matchScore : 0f,
-            fr.matchScore,
-            fr.matched,
-            fr.matched ? "matched" : "not_matched");
+        fr.identityEvidence != null
+            ? fr.identityEvidence
+            : new IdentityEvidence(
+                fr.matched ? fr.matchScore : 0f,
+                fr.matchScore,
+                fr.matched,
+                fr.matched ? "matched" : "not_matched");
     DistanceEvidence distance;
     if (fr.distanceEstimate != null) {
       distance =
@@ -595,6 +679,22 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   protected Model getModel() {
     return model;
+  }
+
+  private static Detector.Recognition selectLargest(List<Detector.Recognition> persons) {
+    Detector.Recognition target = null;
+    float maxArea = -1f;
+    if (persons == null) return null;
+    for (Detector.Recognition r : persons) {
+      if (r == null || r.getLocation() == null) continue;
+      RectF loc = r.getLocation();
+      float area = loc.width() * loc.height();
+      if (area > maxArea) {
+        maxArea = area;
+        target = r;
+      }
+    }
+    return target;
   }
 
   @Override

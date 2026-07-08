@@ -22,6 +22,7 @@ public class FollowStateMachine {
     public float matchScore;
     public ImageSetpointDistanceEstimator.DistanceEstimate distanceEstimate;
     public BehaviorDecisionResult behaviorDecision;
+    public IdentityEvidence identityEvidence;
 
     public FrameResult(
         FollowState state,
@@ -50,8 +51,15 @@ public class FollowStateMachine {
   public int REACQUIRE_MATCH_N = 8;
   public int FOLLOW_LOST_M = 10;
   public long LOST_TO_SEARCH_MS = 800;
-  public long SEARCH_TIMEOUT_MS = 5000;
+  public long SEARCH_TIMEOUT_MS = 18000;
+  public long IDENTITY_UNCERTAIN_TIMEOUT_MS = 18000;
   public long COUNTDOWN_MS = 3000;
+  public int CAUTION_STABLE_FRAMES = 3;
+  public int UNCERTAIN_FRAMES = 3;
+  public int UNCERTAIN_RECOVER_FRAMES = 2;
+  public int REACQUIRE_STRICT_FRAMES = 1;
+  public int REACQUIRE_DEFAULT_FRAMES = 2;
+  public int LOST_RECOVER_FRAMES = 3;
 
   private final TargetMatcher matcher;
   private final ControlGenerator controlGenerator;
@@ -61,6 +69,10 @@ public class FollowStateMachine {
   private int captureCount = 0;
   private int matchCount = 0;
   private int lostCount = 0;
+  private int midDefaultStreak = 0;
+  private int strongDefaultStreak = 0;
+  private int strongStrictStreak = 0;
+  private int unstableStreak = 0;
   private long stateEnterTime = 0L;
   private Bitmap snapshot = null;
 
@@ -82,6 +94,7 @@ public class FollowStateMachine {
       memory.clear();
       snapshot = null;
       captureCount = 0;
+      resetEvidenceCounters();
       state = FollowState.CAPTURE_TARGET;
     }
   }
@@ -108,11 +121,22 @@ public class FollowStateMachine {
     captureCount = 0;
     matchCount = 0;
     lostCount = 0;
+    resetEvidenceCounters();
     state = FollowState.IDLE;
   }
 
   public FrameResult onFrame(
       List<Recognition> persons, Bitmap frame, int frameW, int frameH, int sensorOrientation) {
+    return onFrame(persons, frame, frameW, frameH, sensorOrientation, null);
+  }
+
+  public FrameResult onFrame(
+      List<Recognition> persons,
+      Bitmap frame,
+      int frameW,
+      int frameH,
+      int sensorOrientation,
+      IdentityEvidence externalIdentity) {
     List<Recognition> safePersons = persons == null ? new ArrayList<>() : persons;
     long now = System.currentTimeMillis();
 
@@ -155,17 +179,24 @@ public class FollowStateMachine {
 
       case REACQUIRE_TARGET: {
         TargetMatcher.MatchResult m = matcher.match(safePersons, frame, memory, frameW, frameH);
-        if (m.matched) matchCount++;
+        IdentityEvidence id = identityFrom(m, externalIdentity);
+        updateEvidenceCounters(id, m, safePersons);
+        if (reacquireReady(id, m, safePersons)) matchCount++;
         else matchCount = 0;
-        if (matchCount >= REACQUIRE_MATCH_N) {
+        Recognition selected = selectedCandidate(id, m);
+        if (selected != null
+            && (strongStrictStreak >= REACQUIRE_STRICT_FRAMES
+                || strongDefaultStreak >= REACQUIRE_DEFAULT_FRAMES
+                || matchCount >= REACQUIRE_MATCH_N)) {
           state = FollowState.READY_TO_FOLLOW;
           stateEnterTime = now;
-          memory.updateDynamic(m.best);
+          memory.updateDynamic(selected);
+          resetEvidenceCounters();
         }
         FrameResult fr =
             new FrameResult(
-                state, new Control(0f, 0f), m.best, null, safePersons, m.matched, false, null, -1);
-        fr.matchScore = m.score;
+                state, new Control(0f, 0f), selected, null, safePersons, id.matched, false, null, -1);
+        fillIdentity(fr, id);
         return fr;
       }
 
@@ -178,63 +209,156 @@ public class FollowStateMachine {
               FollowState.FOLLOW, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
         }
         TargetMatcher.MatchResult m = matcher.match(safePersons, frame, memory, frameW, frameH);
+        IdentityEvidence id = identityFrom(m, externalIdentity);
+        Recognition selected = selectedCandidate(id, m);
         FrameResult fr =
             new FrameResult(
                 FollowState.READY_TO_FOLLOW,
                 new Control(0f, 0f),
-                m.best,
+                selected,
                 null,
                 safePersons,
-                m.matched,
+                id.matched,
                 false,
                 null,
                 Math.max(0, cd));
-        fr.matchScore = m.score;
+        fillIdentity(fr, id);
         return fr;
       }
 
       case FOLLOW: {
         TargetMatcher.MatchResult m = matcher.match(safePersons, frame, memory, frameW, frameH);
-        if (m.matched) {
-          memory.updateDynamic(m.best);
+        IdentityEvidence id = identityFrom(m, externalIdentity);
+        updateEvidenceCounters(id, m, safePersons);
+        Recognition selected = selectedCandidate(id, m);
+        if (selected != null && followConfident(id, m, safePersons)) {
+          memory.updateDynamic(selected);
           lostCount = 0;
           ControlGenerator.Result res =
               controlGenerator.generateFromTarget(
-                  m.best, safePersons, frameW, frameH, sensorOrientation, memory);
+                  selected, safePersons, frameW, frameH, sensorOrientation, memory);
           FrameResult fr =
               new FrameResult(
-                  FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
-          fr.matchScore = m.score;
+                  FollowState.FOLLOW, res.control, selected, null, safePersons, true, res.tooClose, null, -1);
+          fillIdentity(fr, id);
+          fr.distanceEstimate = res.distanceEstimate;
+          return fr;
+        }
+        if (selected != null && followCaution(id, m, safePersons)) {
+          state = FollowState.FOLLOW_CAUTION;
+          memory.updateDynamic(selected);
+          ControlGenerator.Result res =
+              controlGenerator.generateFromTarget(
+                  selected, safePersons, frameW, frameH, sensorOrientation, memory);
+          FrameResult fr =
+              new FrameResult(
+                  FollowState.FOLLOW_CAUTION,
+                  res.control,
+                  selected,
+                  null,
+                  safePersons,
+                  true,
+                  res.tooClose,
+                  null,
+                  -1);
+          fillIdentity(fr, id);
           fr.distanceEstimate = res.distanceEstimate;
           return fr;
         }
         lostCount++;
         if (lostCount >= FOLLOW_LOST_M) {
-          state = FollowState.LOST;
+          state = FollowState.IDENTITY_UNCERTAIN;
           stateEnterTime = now;
+          resetEvidenceCounters();
         }
         FrameResult fr =
             new FrameResult(
                 state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
-        fr.matchScore = m.score;
+        fillIdentity(fr, id);
+        return fr;
+      }
+
+      case FOLLOW_CAUTION: {
+        TargetMatcher.MatchResult m = matcher.match(safePersons, frame, memory, frameW, frameH);
+        IdentityEvidence id = identityFrom(m, externalIdentity);
+        updateEvidenceCounters(id, m, safePersons);
+        Recognition selected = selectedCandidate(id, m);
+        if (selected != null && midDefaultStreak >= CAUTION_STABLE_FRAMES) {
+          state = FollowState.FOLLOW;
+          memory.updateDynamic(selected);
+          ControlGenerator.Result res =
+              controlGenerator.generateFromTarget(
+                  selected, safePersons, frameW, frameH, sensorOrientation, memory);
+          FrameResult fr =
+              new FrameResult(
+                  FollowState.FOLLOW, res.control, selected, null, safePersons, true, res.tooClose, null, -1);
+          fillIdentity(fr, id);
+          fr.distanceEstimate = res.distanceEstimate;
+          return fr;
+        }
+        if (selected != null && followCaution(id, m, safePersons)) {
+          memory.updateDynamic(selected);
+          ControlGenerator.Result res =
+              controlGenerator.generateFromTarget(
+                  selected, safePersons, frameW, frameH, sensorOrientation, memory);
+          FrameResult fr =
+              new FrameResult(
+                  FollowState.FOLLOW_CAUTION,
+                  res.control,
+                  selected,
+                  null,
+                  safePersons,
+                  true,
+                  res.tooClose,
+                  null,
+                  -1);
+          fillIdentity(fr, id);
+          fr.distanceEstimate = res.distanceEstimate;
+          return fr;
+        }
+        unstableStreak++;
+        if (unstableStreak >= UNCERTAIN_FRAMES) {
+          state = FollowState.IDENTITY_UNCERTAIN;
+          stateEnterTime = now;
+          resetEvidenceCounters();
+        }
+        FrameResult fr =
+            new FrameResult(
+                state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
+        fillIdentity(fr, id);
+        return fr;
+      }
+
+      case IDENTITY_UNCERTAIN: {
+        TargetMatcher.MatchResult m = matcher.match(safePersons, frame, memory, frameW, frameH);
+        IdentityEvidence id = identityFrom(m, externalIdentity);
+        updateEvidenceCounters(id, m, safePersons);
+        Recognition selected = selectedCandidate(id, m);
+        if (selected != null
+            && (strongStrictStreak >= UNCERTAIN_RECOVER_FRAMES
+                || midDefaultStreak >= UNCERTAIN_RECOVER_FRAMES)) {
+          state = FollowState.REACQUIRE_TARGET;
+          matchCount = 0;
+          stateEnterTime = now;
+        } else if (now - stateEnterTime >= IDENTITY_UNCERTAIN_TIMEOUT_MS) {
+          state = FollowState.STOP;
+        }
+        FrameResult fr =
+            new FrameResult(
+                state, new Control(0f, 0f), selected, null, safePersons, false, false, null, -1);
+        fillIdentity(fr, id);
         return fr;
       }
 
       case LOST: {
         TargetMatcher.MatchResult m = matcher.match(safePersons, frame, memory, frameW, frameH);
-        if (m.matched) {
-          state = FollowState.FOLLOW;
-          lostCount = 0;
-          memory.updateDynamic(m.best);
-          ControlGenerator.Result res =
-              controlGenerator.generateFromTarget(
-                  m.best, safePersons, frameW, frameH, sensorOrientation, memory);
-          FrameResult fr =
-              new FrameResult(
-                  FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
-          fr.matchScore = m.score;
-          fr.distanceEstimate = res.distanceEstimate;
-          return fr;
+        IdentityEvidence id = identityFrom(m, externalIdentity);
+        updateEvidenceCounters(id, m, safePersons);
+        Recognition selected = selectedCandidate(id, m);
+        if (selected != null && lostRecoverReady(id, m, safePersons)) {
+          state = FollowState.REACQUIRE_TARGET;
+          matchCount = 0;
+          stateEnterTime = now;
         }
         if (now - stateEnterTime >= LOST_TO_SEARCH_MS) {
           state = FollowState.SEARCH;
@@ -242,34 +366,28 @@ public class FollowStateMachine {
         }
         FrameResult fr =
             new FrameResult(
-                state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
-        fr.matchScore = m.score;
+                state, new Control(0f, 0f), selected, null, safePersons, false, false, null, -1);
+        fillIdentity(fr, id);
         return fr;
       }
 
       case SEARCH: {
         TargetMatcher.MatchResult m = matcher.match(safePersons, frame, memory, frameW, frameH);
-        if (m.matched) {
-          state = FollowState.FOLLOW;
-          lostCount = 0;
-          memory.updateDynamic(m.best);
-          ControlGenerator.Result res =
-              controlGenerator.generateFromTarget(
-                  m.best, safePersons, frameW, frameH, sensorOrientation, memory);
-          FrameResult fr =
-              new FrameResult(
-                  FollowState.FOLLOW, res.control, m.best, null, safePersons, true, res.tooClose, null, -1);
-          fr.matchScore = m.score;
-          fr.distanceEstimate = res.distanceEstimate;
-          return fr;
+        IdentityEvidence id = identityFrom(m, externalIdentity);
+        updateEvidenceCounters(id, m, safePersons);
+        Recognition selected = selectedCandidate(id, m);
+        if (selected != null && lostRecoverReady(id, m, safePersons)) {
+          state = FollowState.REACQUIRE_TARGET;
+          matchCount = 0;
+          stateEnterTime = now;
         }
         if (now - stateEnterTime >= SEARCH_TIMEOUT_MS) {
           state = FollowState.STOP;
         }
         FrameResult fr =
             new FrameResult(
-                state, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
-        fr.matchScore = m.score;
+                state, new Control(0f, 0f), selected, null, safePersons, false, false, null, -1);
+        fillIdentity(fr, id);
         return fr;
       }
 
@@ -278,6 +396,106 @@ public class FollowStateMachine {
         return new FrameResult(
             FollowState.STOP, new Control(0f, 0f), null, null, safePersons, false, false, null, -1);
     }
+  }
+
+  private void fillIdentity(FrameResult fr, IdentityEvidence id) {
+    if (fr == null || id == null) return;
+    fr.identityEvidence = id;
+    fr.matchScore = id.confidence;
+  }
+
+  private IdentityEvidence identityFrom(TargetMatcher.MatchResult m, IdentityEvidence external) {
+    if (external != null) return external;
+    return new IdentityEvidence(
+        m.matched ? m.score : 0f,
+        m.score,
+        m.matched,
+        m.matched ? "legacy_matched" : "legacy_not_matched",
+        ReIDMatchResult.unavailable("reid_not_connected", 0),
+        BboxContinuityEvidence.from(
+            m.best == null ? null : m.best.getLocation(),
+            memory.getLastBbox(),
+            memory.getPreviousBbox(),
+            1,
+            1),
+        0,
+        0,
+        m.best);
+  }
+
+  private Recognition selectedCandidate(IdentityEvidence id, TargetMatcher.MatchResult m) {
+    if (id != null && id.bestCandidate != null) return id.bestCandidate;
+    return m == null ? null : m.best;
+  }
+
+  private boolean followConfident(
+      IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    if (id != null && id.reidAvailable()) {
+      return id.weakOk() && id.bboxDefaultOk();
+    }
+    return m != null && m.matched && (persons == null || persons.size() <= 1 || id.bboxDefaultOk());
+  }
+
+  private boolean followCaution(
+      IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    if (id != null && id.reidAvailable()) {
+      return id.bboxDefaultOk() && (id.weakOk() || id.midOk());
+    }
+    return m != null && m.matched && id != null && id.bboxDefaultOk() && persons != null && persons.size() <= 1;
+  }
+
+  private boolean reacquireReady(
+      IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    if (id != null && id.reidAvailable()) {
+      return (id.strongOk() && id.bboxDefaultOk()) || (id.midOk() && id.bboxStrictOk());
+    }
+    return m != null && m.matched && id != null && id.bboxStrictOk() && persons != null && persons.size() <= 1;
+  }
+
+  private boolean lostRecoverReady(
+      IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    if (id != null && id.reidAvailable()) {
+      return strongStrictStreak >= LOST_RECOVER_FRAMES
+          || strongDefaultStreak >= LOST_RECOVER_FRAMES
+          || midDefaultStreak >= LOST_RECOVER_FRAMES;
+    }
+    return m != null
+        && m.matched
+        && id != null
+        && id.bboxStrictOk()
+        && persons != null
+        && persons.size() <= 1
+        && strongStrictStreak >= LOST_RECOVER_FRAMES;
+  }
+
+  private void updateEvidenceCounters(
+      IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    boolean reidAvailable = id != null && id.reidAvailable();
+    boolean midDefault;
+    boolean strongDefault;
+    boolean strongStrict;
+    if (reidAvailable) {
+      midDefault = id.midOk() && id.bboxDefaultOk();
+      strongDefault = id.strongOk() && id.bboxDefaultOk();
+      strongStrict = id.strongOk() && id.bboxStrictOk();
+    } else {
+      boolean legacySafe =
+          m != null && m.matched && id != null && persons != null && persons.size() <= 1;
+      midDefault = legacySafe && id.bboxDefaultOk();
+      strongDefault = legacySafe && id.bboxDefaultOk();
+      strongStrict = legacySafe && id.bboxStrictOk();
+    }
+    midDefaultStreak = midDefault ? midDefaultStreak + 1 : 0;
+    strongDefaultStreak = strongDefault ? strongDefaultStreak + 1 : 0;
+    strongStrictStreak = strongStrict ? strongStrictStreak + 1 : 0;
+    if (midDefault || strongDefault || strongStrict) unstableStreak = 0;
+  }
+
+  private void resetEvidenceCounters() {
+    midDefaultStreak = 0;
+    strongDefaultStreak = 0;
+    strongStrictStreak = 0;
+    unstableStreak = 0;
   }
 
   private static Recognition selectLargest(List<Recognition> persons) {
