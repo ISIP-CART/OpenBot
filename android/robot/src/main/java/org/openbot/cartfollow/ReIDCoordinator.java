@@ -2,6 +2,7 @@ package org.openbot.cartfollow;
 
 import android.app.Activity;
 import android.graphics.Bitmap;
+import android.graphics.Matrix;
 import android.graphics.RectF;
 import android.os.SystemClock;
 import java.io.IOException;
@@ -77,13 +78,15 @@ public class ReIDCoordinator {
     return lastResult;
   }
 
-  public void collectInitializationCandidate(Bitmap frame, Recognition candidate) {
+  public void collectInitializationCandidate(
+      Bitmap frame, Recognition candidate, int sensorOrientation) {
     if (!isAvailable() || frame == null || candidate == null || candidate.getLocation() == null) {
       return;
     }
     if (pendingGallery.size() >= MAX_PENDING_GALLERY) return;
-    Bitmap crop = cropPerson(frame, candidate.getLocation(), 0.08f);
+    Bitmap crop = cropPerson(frame, candidate.getLocation(), 0.08f, sensorOrientation);
     float[] feature = extractor.extract(crop);
+    crop.recycle();
     if (feature != null) pendingGallery.add(feature);
   }
 
@@ -105,11 +108,12 @@ public class ReIDCoordinator {
       FollowState state,
       int frameW,
       int frameH,
+      int sensorOrientation,
       float legacyScore,
       boolean legacyMatched,
       Recognition legacyBest) {
     ReIDMatchResult result =
-        maybeRunReID(persons, frame, memory, state, frameW, frameH, legacyBest);
+        maybeRunReID(persons, frame, memory, state, frameW, frameH, sensorOrientation, legacyBest);
     Recognition best = lastBestCandidate != null ? lastBestCandidate : legacyBest;
     boolean matched = legacyMatched;
     float confidence = legacyScore;
@@ -136,6 +140,7 @@ public class ReIDCoordinator {
       FollowState state,
       int frameW,
       int frameH,
+      int sensorOrientation,
       Recognition legacyBest) {
     if (!isAvailable()) {
       lastResult = ReIDMatchResult.unavailable(disabledReason, 0);
@@ -166,8 +171,9 @@ public class ReIDCoordinator {
     long start = SystemClock.elapsedRealtime();
     List<CandidateScore> scores = new ArrayList<>();
     for (CandidateRef ref : candidateRefs(persons, legacyBest)) {
-      Bitmap crop = cropPerson(frame, ref.recognition.getLocation(), 0.08f);
+      Bitmap crop = cropPerson(frame, ref.recognition.getLocation(), 0.08f, sensorOrientation);
       float[] feature = extractor.extract(crop);
+      crop.recycle();
       if (feature == null) continue;
       float score = maxSimilarity(feature, confirmedGallery);
       scores.add(new CandidateScore(ref.index, ref.recognition, score));
@@ -241,7 +247,8 @@ public class ReIDCoordinator {
     return refs;
   }
 
-  private static Bitmap cropPerson(Bitmap frame, RectF bbox, float paddingRatio) {
+  private static Bitmap cropPerson(
+      Bitmap frame, RectF bbox, float paddingRatio, int sensorOrientation) {
     int fw = frame.getWidth();
     int fh = frame.getHeight();
     float padX = bbox.width() * paddingRatio;
@@ -252,7 +259,15 @@ public class ReIDCoordinator {
     int bottom = clamp((int) (bbox.bottom + padY), 1, fh);
     int width = Math.max(1, right - left);
     int height = Math.max(1, bottom - top);
-    return Bitmap.createBitmap(frame, left, top, width, height);
+    Bitmap rawCrop = Bitmap.createBitmap(frame, left, top, width, height);
+    int rotation = ((sensorOrientation % 360) + 360) % 360;
+    if (rotation == 0) return rawCrop;
+    Matrix matrix = new Matrix();
+    matrix.postRotate(rotation);
+    Bitmap upright =
+        Bitmap.createBitmap(rawCrop, 0, 0, rawCrop.getWidth(), rawCrop.getHeight(), matrix, true);
+    rawCrop.recycle();
+    return upright;
   }
 
   private static List<float[]> selectDiverse(List<float[]> features, int k) {

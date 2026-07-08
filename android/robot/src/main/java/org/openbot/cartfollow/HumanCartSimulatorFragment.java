@@ -372,9 +372,10 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             Detector.Recognition largestPerson = selectLargest(mappedRecognitions);
             if (currentState == FollowState.CAPTURE_TARGET) {
               if (reidCoordinator != null) {
-                reidCoordinator.collectInitializationCandidate(workingFrame, largestPerson);
+                reidCoordinator.collectInitializationCandidate(
+                    workingFrame, largestPerson, sensorOrientation);
               }
-              maybeSaveGalleryCandidate(workingFrame, largestPerson);
+              maybeSaveGalleryCandidate(workingFrame, largestPerson, sensorOrientation);
             }
             TargetMatcher.MatchResult legacyMatch =
                 matcher.match(
@@ -389,6 +390,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
                         currentState,
                         frameW,
                         frameH,
+                        sensorOrientation,
                         legacyMatch.score,
                         legacyMatch.matched,
                         legacyMatch.best);
@@ -616,7 +618,13 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     boolean reidAvailable = reidCoordinator != null && reidCoordinator.isAvailable();
     int gallerySize = reidCoordinator == null ? 0 : reidCoordinator.getGallerySize();
     diagnosticSession.writeSessionInfo(
-        diagnosticConfig, detectorName, minConfidence, reidAvailable, gallerySize);
+        diagnosticConfig,
+        detectorName,
+        minConfidence,
+        reidAvailable,
+        gallerySize,
+        true,
+        sensorOrientation);
     resetTargetEventButton();
     Toast.makeText(
             requireContext(),
@@ -703,7 +711,8 @@ public class HumanCartSimulatorFragment extends CameraFragment {
         shouldSaveCrop);
   }
 
-  private void maybeSaveGalleryCandidate(Bitmap frame, Detector.Recognition candidate) {
+  private void maybeSaveGalleryCandidate(
+      Bitmap frame, Detector.Recognition candidate, int sensorOrientation) {
     if (diagnosticSession == null || frame == null || candidate == null) return;
     if (candidate.getLocation() == null) return;
     long now = SystemClock.elapsedRealtime();
@@ -711,7 +720,8 @@ public class HumanCartSimulatorFragment extends CameraFragment {
         && now - lastDiagnosticGalleryMs < diagnosticConfig.cropIntervalMs) {
       return;
     }
-    Bitmap crop = cropPerson(frame, candidate.getLocation(), diagnosticConfig.paddingRatio);
+    Bitmap crop =
+        cropPerson(frame, candidate.getLocation(), diagnosticConfig.paddingRatio, sensorOrientation);
     if (crop == null) return;
     lastDiagnosticGalleryMs = now;
     diagnosticSaver.saveGallerySnapshotAsync(
@@ -723,7 +733,8 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     return track == null || !track.isVisible() ? null : track.recognition;
   }
 
-  private static Bitmap cropPerson(Bitmap frame, RectF bbox, float paddingRatio) {
+  private static Bitmap cropPerson(
+      Bitmap frame, RectF bbox, float paddingRatio, int sensorOrientation) {
     if (frame == null || bbox == null) return null;
     float padX = bbox.width() * paddingRatio;
     float padY = bbox.height() * paddingRatio;
@@ -735,7 +746,15 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     int height = bottom - top;
     if (width <= 0 || height <= 0) return null;
     try {
-      return Bitmap.createBitmap(frame, left, top, width, height);
+      Bitmap rawCrop = Bitmap.createBitmap(frame, left, top, width, height);
+      int rotation = ((sensorOrientation % 360) + 360) % 360;
+      if (rotation == 0) return rawCrop;
+      Matrix matrix = new Matrix();
+      matrix.postRotate(rotation);
+      Bitmap upright =
+          Bitmap.createBitmap(rawCrop, 0, 0, rawCrop.getWidth(), rawCrop.getHeight(), matrix, true);
+      rawCrop.recycle();
+      return upright;
     } catch (Exception e) {
       return null;
     }
@@ -813,7 +832,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     String compactInfo =
         String.format(
             Locale.US,
-            "fps=%.1f\nstate=%s\naction=%s\npersons=%d\ntrack=%d locked=%d suspected=%d\nbelief=%.2f\nbest=%.3f margin=%.3f",
+            "fps=%.1f\nstate=%s\naction=%s\npersons=%d\ntrack=%d locked=%d suspected=%d\nbelief=%.2f\nbest=%.3f margin=%.3f\nreidCrop=upright",
             fps,
             state.name(),
             behaviorDecision == null ? "-" : behaviorDecision.selectedAction.name(),
@@ -834,7 +853,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private String buildIdentityDebugLine(IdentityEvidence identity) {
     if (identity == null) {
-      return "reidAvailable=false\ngallerySize=0\nbestScore=0.000\nsecondScore=0.000\nmargin=0.000\nweak/mid/strong=false/false/false\nbboxDefault=false bboxStrict=false prediction=false\nstableMatchCount=0\ncandidateSwitchCount=0\nreidLatencyMs=0\nreidReason=-\nactiveTrackCount=0\ntrackId=-1 lockedTrackId=-1 suspectedTrackId=-1\ntrackAge=0 missedFrames=0\nbelief=0.00 beliefStable=0 beliefUncertain=0\nbeliefReason=-";
+      return "reidAvailable=false\nreidCrop=upright\ngallerySize=0\nbestScore=0.000\nsecondScore=0.000\nmargin=0.000\nweak/mid/strong=false/false/false\nbboxDefault=false bboxStrict=false prediction=false\nstableMatchCount=0\ncandidateSwitchCount=0\nreidLatencyMs=0\nreidReason=-\nactiveTrackCount=0\ntrackId=-1 lockedTrackId=-1 suspectedTrackId=-1\ntrackAge=0 missedFrames=0\nbelief=0.00 beliefStable=0 beliefUncertain=0\nbeliefReason=-";
     }
     ReIDMatchResult reid = identity.reidMatch;
     BboxContinuityEvidence bbox = identity.bboxContinuity;
@@ -847,7 +866,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     String reason = reid == null ? identity.reason : reid.reason;
     return String.format(
         Locale.US,
-        "reidAvailable=%s\ngallerySize=%d\nbestScore=%.3f\nsecondScore=%.3f\nmargin=%.3f\nweak/mid/strong=%s/%s/%s\nbboxDefault=%s bboxStrict=%s prediction=%s\nstableMatchCount=%d\ncandidateSwitchCount=%d\nreidLatencyMs=%d\nreidReason=%s\nactiveTrackCount=%d\ntrackId=%d lockedTrackId=%d suspectedTrackId=%d\ntrackAge=%d missedFrames=%d\nbelief=%.2f reidC=%.2f bboxC=%.2f predC=%.2f switchP=%.2f\nbeliefStable=%d beliefUncertain=%d\nbeliefReason=%s",
+        "reidAvailable=%s\nreidCrop=upright\ngallerySize=%d\nbestScore=%.3f\nsecondScore=%.3f\nmargin=%.3f\nweak/mid/strong=%s/%s/%s\nbboxDefault=%s bboxStrict=%s prediction=%s\nstableMatchCount=%d\ncandidateSwitchCount=%d\nreidLatencyMs=%d\nreidReason=%s\nactiveTrackCount=%d\ntrackId=%d lockedTrackId=%d suspectedTrackId=%d\ntrackAge=%d missedFrames=%d\nbelief=%.2f reidC=%.2f bboxC=%.2f predC=%.2f switchP=%.2f\nbeliefStable=%d beliefUncertain=%d\nbeliefReason=%s",
         reidAvailable,
         gallerySize,
         best,

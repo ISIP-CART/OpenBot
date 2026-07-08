@@ -762,3 +762,124 @@ $env:Path="$env:JAVA_HOME\bin;$env:Path"
 5. 默认左上角不再显示大块完整 debug；点击 `调试详情` 后可展开完整字段。
 6. Stop / Cancel / Retake / 页面暂停后，诊断 session 应关闭，按钮禁用并复位。
 7. 导出诊断目录后，应能用 `events.csv` 附近的 `frame_log.csv` 和 `identity_log.csv` 判断黄框不转绿或非目标转绿的原因。
+
+---
+
+## 13. Phase C ReID 输入方向修正（2026-07-08）
+
+### 13.1 修正原因
+
+PC 侧 `cartfollow_diagnostics` 复盘发现，旧版诊断 gallery 全部被标记为 `landscape_or_rotated`。代码检查确认旧版 `ReIDCoordinator` 直接在原始 `workingFrame` 上按 bbox 裁剪，并立即送入 `TfliteReIDFeatureExtractor`，没有按 `sensorOrientation` 将 person crop 转正。
+
+这意味着旧版 Android ReID 虽然可以运行并输出分数，但 gallery 与候选 crop 都可能以横向姿态进入模型，影响目标返回和多人干扰场景下的稳定性。
+
+### 13.2 本轮代码变化
+
+- `ReIDCoordinator.collectInitializationCandidate()` 增加 `sensorOrientation` 参数，gallery candidate crop 裁剪后旋转为 upright 再提取 embedding。
+- `ReIDCoordinator.evaluate()` 和内部 ReID candidate 推理同样使用 upright crop。
+- `HumanCartSimulatorFragment` 调用 ReIDCoordinator 时传入当前 `sensorOrientation`。
+- 诊断 `gallery/` 中保存的初始化候选 crop 改为 upright 版本。
+- `session_info.json` 写入 `reid_crop_upright=true` 和 `sensor_orientation`。
+- debug 简洁面板和完整面板增加 `reidCrop=upright`，用于实机确认新版路径已生效。
+
+本轮没有修改 ReID 阈值、belief 阈值、bbox gate、状态机恢复规则或真实底盘控制路径。
+
+### 13.3 构建验证
+
+构建命令：
+
+```powershell
+$env:JAVA_HOME='D:\Java\jdk-17'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过。构建日志仍有既有 TensorFlow Lite manifest namespace warning、Kotlin/Javac target warning 和 deprecated Gradle warning，均未阻塞构建。
+
+### 13.4 下一轮手机验收重点
+
+1. Human Cart Simulator debug 应显示 `reidCrop=upright`。
+2. 新采集的 `session_info.json` 应包含 `reid_crop_upright=true`。
+3. 新采集的 `gallery/` 不应再全部被 PC 分析脚本标记为 `landscape_or_rotated`。
+4. 对比旧数据，观察 `target_return` 后 `frames_to_reacquire / frames_to_follow` 是否缩短。
+5. 若 upright crop 后仍大量出现 `belief_high_bbox_failed`，下一轮再处理分状态 bbox gate 和 recoverable stop。
+
+---
+
+## 14. Phase C 新旧诊断数据对比结论（2026-07-08）
+
+### 14.1 分析输入
+
+本轮没有继续改 Android 策略，而是先对新旧 `cartfollow_diagnostics` 做 PC 离线对比：
+
+```text
+old: tools/reid_pc_test/images/cartfollow_diagnostics_old/
+new: tools/reid_pc_test/images/cartfollow_diagnostics/
+```
+
+新版数据来自 ReID crop upright 修正后的 APK，`session_info.json` 中应出现：
+
+```text
+reid_crop_upright=true
+sensor_orientation=90
+```
+
+PC 分析命令：
+
+```powershell
+cd tools/reid_pc_test
+python analyze_cartfollow_diagnostics_v1.py ^
+  --compare-roots old=images/cartfollow_diagnostics_old,new=images/cartfollow_diagnostics ^
+  --output outputs/cartfollow_diagnostics_analysis/compare
+```
+
+### 14.2 对比结果
+
+| 数据 | sessions | target_return | recovered_rate | recovered_fast | recovered_slow | not_recovered | hard_stop | best_mean | margin_mean | bbox_default_rate | gallery_candidate_landscape_rate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| old | 4 | 11 | 0.5455 | 5 | 1 | 3 | 2 | 0.5017 | 0.3431 | 0.4451 | 1.0000 |
+| new | 2 | 16 | 0.8750 | 11 | 3 | 2 | 0 | 0.5992 | 0.4611 | 0.5485 | 0.0000 |
+
+结论：
+
+- upright crop 修正确实生效：新版 `gallery_candidate_landscape_rate=0.0000`。
+- ReID 分数整体提高：`best_mean` 和 `margin_mean` 都高于旧版。
+- `target_return` 后恢复率提升，且新版暂未出现 `hard_stop_before_return`。
+- 这轮结果说明 ReID 输入方向已不是主要问题。
+
+### 14.3 当前剩余问题
+
+新版主要 blocker：
+
+```text
+candidate_switch_penalty: 15
+belief_high_bbox_failed: 10
+```
+
+含义：
+
+- `candidate_switch_penalty` 说明目标返回或多人干扰时，suspected track 仍容易切换，trackId / lockedTrackId 保护还不够稳。
+- `belief_high_bbox_failed` 说明 ReID / belief 已经有较强证据，但 bbox default/strict gate 不通过，导致黄框迟迟不能转绿。
+
+因此下一轮 Android 工作不应继续优先调 ReID 模型、TFLite 性能或 `bestScore / margin` 阈值，而应聚焦：
+
+1. `TargetTrackManager` 的 track association 稳定性。
+2. locked track 的保留与 suspected track 升级规则。
+3. `FOLLOW` 与 `REACQUIRE/IDENTITY_UNCERTAIN/SEARCH` 使用不同 bbox gate。
+4. recoverable stop 与 hard `STOP` 的边界。
+
+### 14.4 下一轮验收口径
+
+下一轮策略改动后继续采集 `cartfollow_diagnostics`，重点比较：
+
+```text
+recovered_rate
+mean_ms_to_follow
+not_recovered_in_window
+candidate_switch_penalty
+belief_high_bbox_failed
+非目标转绿是否增加
+gallery_candidate_landscape_rate 是否保持 0
+```
+
+如果 `candidate_switch_penalty` 和 `belief_high_bbox_failed` 下降，同时非目标转绿不增加，才说明策略改动真正改善了“目标返回后迟迟不转绿”和“干扰者偶发转绿”两个问题。
