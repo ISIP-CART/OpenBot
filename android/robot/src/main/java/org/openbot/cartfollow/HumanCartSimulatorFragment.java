@@ -69,6 +69,8 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private final FollowStateMachine stateMachine =
       new FollowStateMachine(matcher, controlGenerator);
   private final ActionArbitrator actionArbitrator = new ActionArbitrator();
+  private final TargetTrackManager targetTrackManager = new TargetTrackManager();
+  private final IdentityBeliefAccumulator beliefAccumulator = new IdentityBeliefAccumulator();
   private ReIDCoordinator reidCoordinator;
 
   private final List<DrawBox> drawBoxes = new ArrayList<>();
@@ -143,16 +145,22 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     binding.btnConfirm.setOnClickListener(
         v -> {
           if (reidCoordinator != null) reidCoordinator.confirmGallery();
+          int lockedTrackId = targetTrackManager.lockClosest(stateMachine.getMemory().getLastBbox());
+          beliefAccumulator.lockTrack(lockedTrackId);
           stateMachine.confirm();
         });
     binding.btnRetake.setOnClickListener(
         v -> {
           if (reidCoordinator != null) reidCoordinator.reset();
+          targetTrackManager.reset();
+          beliefAccumulator.reset();
           stateMachine.retake();
         });
     binding.btnCancel.setOnClickListener(
         v -> {
           if (reidCoordinator != null) reidCoordinator.reset();
+          targetTrackManager.reset();
+          beliefAccumulator.reset();
           stateMachine.cancel();
         });
 
@@ -162,10 +170,14 @@ public class HumanCartSimulatorFragment extends CameraFragment {
           if (binding.startSwitch.isChecked()) {
             binding.modelSpinner.setEnabled(false);
             if (reidCoordinator != null) reidCoordinator.reset();
+            targetTrackManager.reset();
+            beliefAccumulator.reset();
             stateMachine.startCapture();
           } else {
             binding.modelSpinner.setEnabled(true);
             if (reidCoordinator != null) reidCoordinator.reset();
+            targetTrackManager.reset();
+            beliefAccumulator.reset();
             stateMachine.cancel();
             resetUiToIdle();
           }
@@ -316,6 +328,8 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
             int frameW = getMaxAnalyseImageSize().getWidth();
             int frameH = getMaxAnalyseImageSize().getHeight();
+            targetTrackManager.update(
+                mappedRecognitions, frameW, frameH, SystemClock.elapsedRealtime());
             FollowState currentState = stateMachine.getState();
             if (currentState == FollowState.CAPTURE_TARGET && reidCoordinator != null) {
               reidCoordinator.collectInitializationCandidate(
@@ -337,6 +351,18 @@ public class HumanCartSimulatorFragment extends CameraFragment {
                         legacyMatch.score,
                         legacyMatch.matched,
                         legacyMatch.best);
+            if (identity != null) {
+              TargetTrack reidCandidateTrack =
+                  targetTrackManager.getTrackForRecognition(identity.bestCandidate);
+              identity =
+                  beliefAccumulator.update(
+                      identity,
+                      targetTrackManager,
+                      reidCandidateTrack,
+                      stateMachine.getMemory(),
+                      frameW,
+                      frameH);
+            }
             FollowStateMachine.FrameResult fr =
                 stateMachine.onFrame(
                     mappedRecognitions, workingFrame, frameW, frameH, sensorOrientation, identity);
@@ -371,12 +397,23 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     for (Detector.Recognition r : fr.persons) {
       if (r == null || r.getLocation() == null) continue;
       int colorType = COLOR_NORMAL;
-      if (r == fr.target) {
+      TargetTrack track = targetTrackManager.getTrackForRecognition(r);
+      if (track != null && targetTrackManager.isLockedTrack(track)) {
+        colorType = COLOR_TARGET;
+      } else if (track != null && track.trackId == targetTrackManager.getSuspectedTrackId()) {
+        colorType = COLOR_CANDIDATE;
+      } else if (r == fr.target) {
         colorType = fr.matched ? COLOR_TARGET : COLOR_FAIL;
       } else if (r == fr.candidate) {
         colorType = COLOR_CANDIDATE;
       }
-      drawBoxes.add(new DrawBox(new RectF(r.getLocation()), colorType));
+      String label = null;
+      if (track != null) {
+        label =
+            String.format(
+                Locale.US, "T%d b=%.2f", track.trackId, beliefAccumulator.getBeliefForTrack(track));
+      }
+      drawBoxes.add(new DrawBox(new RectF(r.getLocation()), colorType, label));
     }
     drawFrameWidth = frameW;
     drawFrameHeight = frameH;
@@ -408,19 +445,19 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       RectF rect = new RectF(box.location);
       matrix.mapRect(rect);
       Paint paint;
-      String label = null;
+      String label = box.label;
       switch (box.colorType) {
         case COLOR_TARGET:
           paint = targetBoxPaint;
-          label = "目标";
+          if (label == null) label = "目标";
           break;
         case COLOR_CANDIDATE:
           paint = candidateBoxPaint;
-          label = "候选";
+          if (label == null) label = "候选";
           break;
         case COLOR_FAIL:
           paint = failBoxPaint;
-          label = "匹配失败";
+          if (label == null) label = "匹配失败";
           break;
         default:
           paint = personBoxPaint;
@@ -582,7 +619,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private String buildIdentityDebugLine(IdentityEvidence identity) {
     if (identity == null) {
-      return "reidAvailable=false\ngallerySize=0\nbestScore=0.000\nsecondScore=0.000\nmargin=0.000\nweak/mid/strong=false/false/false\nbboxDefault=false bboxStrict=false prediction=false\nstableMatchCount=0\ncandidateSwitchCount=0\nreidLatencyMs=0\nreidReason=-";
+      return "reidAvailable=false\ngallerySize=0\nbestScore=0.000\nsecondScore=0.000\nmargin=0.000\nweak/mid/strong=false/false/false\nbboxDefault=false bboxStrict=false prediction=false\nstableMatchCount=0\ncandidateSwitchCount=0\nreidLatencyMs=0\nreidReason=-\nactiveTrackCount=0\ntrackId=-1 lockedTrackId=-1 suspectedTrackId=-1\ntrackAge=0 missedFrames=0\nbelief=0.00 beliefStable=0 beliefUncertain=0\nbeliefReason=-";
     }
     ReIDMatchResult reid = identity.reidMatch;
     BboxContinuityEvidence bbox = identity.bboxContinuity;
@@ -595,7 +632,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     String reason = reid == null ? identity.reason : reid.reason;
     return String.format(
         Locale.US,
-        "reidAvailable=%s\ngallerySize=%d\nbestScore=%.3f\nsecondScore=%.3f\nmargin=%.3f\nweak/mid/strong=%s/%s/%s\nbboxDefault=%s bboxStrict=%s prediction=%s\nstableMatchCount=%d\ncandidateSwitchCount=%d\nreidLatencyMs=%d\nreidReason=%s",
+        "reidAvailable=%s\ngallerySize=%d\nbestScore=%.3f\nsecondScore=%.3f\nmargin=%.3f\nweak/mid/strong=%s/%s/%s\nbboxDefault=%s bboxStrict=%s prediction=%s\nstableMatchCount=%d\ncandidateSwitchCount=%d\nreidLatencyMs=%d\nreidReason=%s\nactiveTrackCount=%d\ntrackId=%d lockedTrackId=%d suspectedTrackId=%d\ntrackAge=%d missedFrames=%d\nbelief=%.2f reidC=%.2f bboxC=%.2f predC=%.2f switchP=%.2f\nbeliefStable=%d beliefUncertain=%d\nbeliefReason=%s",
         reidAvailable,
         gallerySize,
         best,
@@ -610,7 +647,21 @@ public class HumanCartSimulatorFragment extends CameraFragment {
         identity.stableMatchCount,
         identity.candidateSwitchCount,
         latency,
-        reason == null ? "-" : reason);
+        reason == null ? "-" : reason,
+        identity.activeTrackCount,
+        identity.trackId,
+        identity.lockedTrackId,
+        identity.suspectedTrackId,
+        identity.trackAge,
+        identity.missedFrames,
+        identity.targetBelief,
+        identity.reidContribution,
+        identity.bboxContribution,
+        identity.predictionContribution,
+        identity.switchPenalty,
+        identity.beliefStableFrames,
+        identity.beliefUncertainFrames,
+        identity.beliefReason == null ? "-" : identity.beliefReason);
   }
 
   private BehaviorDecisionResult decideBehavior(
@@ -717,10 +768,12 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private static class DrawBox {
     final RectF location;
     final int colorType;
+    final String label;
 
-    DrawBox(RectF location, int colorType) {
+    DrawBox(RectF location, int colorType, String label) {
       this.location = location;
       this.colorType = colorType;
+      this.label = label;
     }
   }
 }

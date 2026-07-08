@@ -430,6 +430,11 @@ public class FollowStateMachine {
 
   private boolean followConfident(
       IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    if (id != null && id.hasBelief()) {
+      return id.beliefConfirmed()
+          && id.beliefStableFrames >= 2
+          && (id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId);
+    }
     if (id != null && id.reidAvailable()) {
       return id.weakOk() && id.bboxDefaultOk();
     }
@@ -438,6 +443,10 @@ public class FollowStateMachine {
 
   private boolean followCaution(
       IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    if (id != null && id.hasBelief()) {
+      return id.beliefCaution()
+          && (id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId);
+    }
     if (id != null && id.reidAvailable()) {
       return id.bboxDefaultOk() && (id.weakOk() || id.midOk());
     }
@@ -446,6 +455,11 @@ public class FollowStateMachine {
 
   private boolean reacquireReady(
       IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    if (id != null && id.hasBelief()) {
+      return id.beliefConfirmed()
+          && id.beliefStableFrames >= 3
+          && (id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId);
+    }
     if (id != null && id.reidAvailable()) {
       return (id.strongOk() && id.bboxDefaultOk()) || (id.midOk() && id.bboxStrictOk());
     }
@@ -454,6 +468,9 @@ public class FollowStateMachine {
 
   private boolean lostRecoverReady(
       IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    if (id != null && id.hasBelief()) {
+      return id.beliefConfirmed() && id.beliefStableFrames >= LOST_RECOVER_FRAMES;
+    }
     if (id != null && id.reidAvailable()) {
       return strongStrictStreak >= LOST_RECOVER_FRAMES
           || strongDefaultStreak >= LOST_RECOVER_FRAMES
@@ -470,6 +487,19 @@ public class FollowStateMachine {
 
   private void updateEvidenceCounters(
       IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
+    if (id != null && id.hasBelief()) {
+      boolean safeBbox = id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId;
+      boolean midDefault = id.targetBelief >= IdentityBelief.BELIEF_CAUTION && safeBbox;
+      boolean strongDefault = id.targetBelief >= IdentityBelief.BELIEF_CONFIRM && safeBbox;
+      boolean strongStrict =
+          id.targetBelief >= IdentityBelief.BELIEF_CONFIRM
+              && (id.bboxStrictOk() || id.predictionOk() || id.trackId == id.lockedTrackId);
+      midDefaultStreak = midDefault ? midDefaultStreak + 1 : 0;
+      strongDefaultStreak = strongDefault ? strongDefaultStreak + 1 : 0;
+      strongStrictStreak = strongStrict ? strongStrictStreak + 1 : 0;
+      if (midDefault || strongDefault || strongStrict) unstableStreak = 0;
+      return;
+    }
     boolean reidAvailable = id != null && id.reidAvailable();
     boolean midDefault;
     boolean strongDefault;

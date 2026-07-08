@@ -87,6 +87,7 @@ Human Cart Simulator 是购物车跟随功能的上位机核心模块，在 Open
 | **Person Sequence Collector** | 已完成 | 可采集无人帧、多人检测、bbox、crop 和人工事件，用于 PC sequence replay |
 | **阶段 A 行为层** | 已完成并通过手机体验 | `Evidence -> BehaviorDecisionResult -> BehaviorAction -> HumanCommand` 已接入 Human Cart Simulator |
 | **阶段 B Android ReID** | 已完成首版并通过手机运行 | TFLite ReID 可运行，debug 字段正常，实机约 30 FPS；仍需阶段 C 轨迹与身份信念层抑制跟错人 |
+| **阶段 C 目标轨迹与身份信念层** | 已完成首版代码接入 | 新增短时 trackId、lockedTrackId、targetBelief 和 suspectedTrack debug，待手机验收调参 |
 
 ### 2.2 Phase 3 首轮 ReID 实验结果（2026-07-06）
 
@@ -261,11 +262,12 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 
 ### Phase 4：目标轨迹与身份信念层（当前下一步）
 
-- [ ] 新增轻量 `TargetTrackManager`，用 bbox IoU / center distance / area ratio 维护短时 trackId
-- [ ] 新增 `IdentityBeliefAccumulator`，对每个 track 累计 targetBelief
-- [ ] locked target 不因干扰者单帧 ReID 高分被抢走
-- [ ] 目标返回后通过 suspected track + 多帧 belief 稳定恢复到 `REACQUIRE_TARGET / FOLLOW_CAUTION`
-- [ ] debug 面板显示 `trackId / lockedTrackId / targetBelief / trackAge / missedFrames / beliefReason`
+- [x] 新增轻量 `TargetTrackManager`，用 bbox IoU / center distance / area ratio 维护短时 trackId
+- [x] 新增 `IdentityBeliefAccumulator`，对每个 track 累计 targetBelief
+- [x] locked target 不因干扰者单帧 ReID 高分被抢走，状态机恢复改为 belief 优先
+- [x] 目标返回后通过 suspected track + 多帧 belief 稳定恢复到 `REACQUIRE_TARGET / FOLLOW_CAUTION`
+- [x] debug 面板显示 `trackId / lockedTrackId / targetBelief / trackAge / missedFrames / beliefReason`
+- [ ] 手机实测验收：目标离开、干扰者进入、目标返回、目标在场干扰者穿越、遮挡
 
 ### Phase 5：距离控制继续收敛
 
@@ -311,6 +313,7 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 | recorded | 2026-07-07 | Add PersonSequenceCollector for continuous sequence data collection |
 | recorded | 2026-07-08 | Add phase A behavior decision layer and Human Cart Simulator action debug |
 | recorded | 2026-07-08 | Add phase B TFLite ReID evidence path for Human Cart Simulator |
+| pending | 2026-07-08 | Add phase C TargetTrack and IdentityBelief layer |
 
 ---
 
@@ -615,3 +618,45 @@ lockedTrackId
 3. 干扰者进入：干扰者可形成新 track，但 targetBelief 不应快速超过恢复阈值。
 4. 目标返回：先成为疑似目标，连续稳定后恢复 `REACQUIRE_TARGET -> FOLLOW_CAUTION / FOLLOW_CONFIDENT`。
 5. 目标在场且干扰者穿越：lockedTrack 应尽量保持，必要时进入 `FOLLOW_CAUTION / IDENTITY_UNCERTAIN`，不冒进切换。
+
+---
+
+## 11. Phase C：目标轨迹与身份信念层首版实现（2026-07-08）
+
+### 11.1 新增代码
+
+| 文件 | 作用 |
+|------|------|
+| `TargetTrack.java` | 记录短时 track 的 `trackId / lastBbox / previousBbox / ageFrames / missedFrames / stableFrames`。 |
+| `TargetTrackManager.java` | 用 bbox IoU、中心距离、面积比例将连续检测框关联为 track，并维护 `lockedTrackId / suspectedTrackId`。 |
+| `IdentityBelief.java` | 定义 `BELIEF_CONFIRM=0.75 / BELIEF_CAUTION=0.55 / BELIEF_LOST=0.30` 和 belief debug 字段。 |
+| `IdentityBeliefAccumulator.java` | 融合 ReID、bbox continuity、prediction、locked target、track age、candidate switch 和 missed frame，输出带 belief 的 `IdentityEvidence`。 |
+
+### 11.2 接入点
+
+- `HumanCartSimulatorFragment` 每帧检测后先调用 `TargetTrackManager.update()`。
+- ReID 单帧输出不再直接交给状态机，而是先通过 `IdentityBeliefAccumulator.update()` 转换为累计身份信念。
+- 用户点击 Confirm 时调用 `lockClosest(memory.getLastBbox())`，建立 `lockedTrackId`。
+- overlay 现在显示 `T<trackId> b=<belief>`；locked track 绿色，suspected track 黄色。
+- debug 面板新增 `activeTrackCount / trackId / lockedTrackId / suspectedTrackId / trackAge / missedFrames / belief / beliefReason`。
+- `FollowStateMachine` 在 `IdentityEvidence.hasBelief()` 时优先使用 `targetBelief + beliefStableFrames + bbox/prediction/lockedTrack` 判断 `FOLLOW / FOLLOW_CAUTION / REACQUIRE_TARGET / IDENTITY_UNCERTAIN`。
+
+### 11.3 构建验证
+
+构建命令：
+
+```powershell
+$env:JAVA_HOME='D:\Java\jdk-17'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过，生成 debug APK。构建日志仍有 TensorFlow Lite manifest namespace warning 和 Kotlin/Javac target warning，均未阻塞构建。
+
+### 11.4 手机验收重点
+
+1. 单人正常跟随：`trackId` 应稳定，`targetBelief` 应逐步升高并保持。
+2. 目标离开画面：动作应进入 motion stop / local search，不继续前进。
+3. 目标离开后干扰者进入：干扰者可形成新 track，但不应快速获得恢复 `FOLLOW` 的 belief。
+4. 目标返回：应先成为 suspected track，经多帧 belief 稳定后恢复到 `REACQUIRE_TARGET / FOLLOW_CAUTION`。
+5. 目标在场时干扰者穿越：locked track 不应被一帧高 ReID 分数抢走；必要时进入 `FOLLOW_CAUTION / IDENTITY_UNCERTAIN`。
