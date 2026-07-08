@@ -484,3 +484,112 @@ $env:Path="$env:JAVA_HOME\bin;$env:Path"
 - 无 ReID 模型时：Human Cart Simulator 应正常打开，debug 显示 `reidAvailable=false`，目标丢失后不应单帧恢复 `FOLLOW`。
 - 放入 TFLite 模型后：确认目标后 `gallerySize` 应逐步达到 8 或实际可用数量；多人、目标离开、目标返回、遮挡场景下观察 `bestScore / margin / stableMatchCount` 是否符合预期。
 - 目标返回时允许 `IDENTITY_UNCERTAIN -> REACQUIRE_TARGET -> FOLLOW`，但不允许单帧高分直接恢复 `FOLLOW`。
+
+---
+
+## 10. Phase B 实机验收更新：ReID 已跑通，但需要 TargetTrack / IdentityBelief（2026-07-08）
+
+### 10.1 当前实机状态
+
+最新 APK 已安装到手机，Human Cart Simulator 中 ReID 首版链路已经成功运行：
+
+- TFLite 模型路径：`assets/networks/reid/osnet_x0_25_market1501.tflite`
+- 模型输入：`[1,3,256,128]`
+- 模型输出：`[1,512]`
+- debug 面板显示的 ReID 字段基本正常
+- 实机帧率约 30 FPS，首轮性能可接受，后续如有必要仍可继续压榨调度策略
+
+当前结论：ReID Android 接入已经从“能否加载/能否推理”进入“如何安全使用推理结果”的阶段。
+
+### 10.2 当前体验问题
+
+手机实测仍暴露两个关键问题：
+
+1. 目标离开画面或多人接近时，虽然统计上比纯 bbox / color 匹配更安全，但仍可能识别错目标并跟着别人走。
+2. 目标重新回到画面后，重捕获有时偏慢，甚至无法及时确认。
+
+这说明当前 `ReIDMatchResult + bbox gate + stable frame` 仍偏“单帧候选驱动”。ReID 分数和 margin 有帮助，但不能直接等价于目标身份。
+
+### 10.3 下一步代码方向
+
+下一步建议在 `ReIDCoordinator` 与 `FollowStateMachine` 之间新增轻量轨迹和身份信念层：
+
+```text
+Detector persons
+  -> TargetTrackManager
+  -> IdentityBeliefAccumulator
+  -> FollowStateMachine
+  -> ActionArbitrator
+```
+
+建议新增或细化类型：
+
+- `TargetTrack`
+  - `trackId`
+  - `lastBbox`
+  - `previousBbox`
+  - `ageFrames`
+  - `missedFrames`
+  - `lastSeenTimestampMs`
+  - `isNearPredictionRegion`
+
+- `TargetTrackManager`
+  - 用 bbox IoU、center distance、area ratio 做短时 person bbox 关联。
+  - 只维护最近几秒的轻量 track，不做复杂多目标跟踪。
+  - 输出当前候选 tracks，供 ReID 和状态机使用。
+
+- `IdentityBelief`
+  - `trackId`
+  - `targetBelief`
+  - `reidContribution`
+  - `bboxContribution`
+  - `predictionContribution`
+  - `switchPenalty`
+  - `stableFrames`
+  - `beliefReason`
+
+- `IdentityBeliefAccumulator`
+  - 对每个 track 累计身份信念。
+  - ReID strong/mid、bbox 连续、prediction 命中时加分。
+  - 候选切换、bbox 跳变、面积突变、margin 低、多人与目标混淆时扣分。
+
+### 10.4 状态机接入原则
+
+后续恢复跟随不应再由“单帧候选高分”触发，而应由“稳定 track + 稳定 belief”触发：
+
+```text
+IDENTITY_UNCERTAIN / SEARCH
+  -> 疑似目标 track 连续稳定
+  -> REACQUIRE_TARGET
+  -> FOLLOW_CAUTION
+  -> FOLLOW_CONFIDENT
+```
+
+安全边界保持不变：
+
+- 身份不确定时线速度为 0。
+- 搜索阶段可以更积极地原地扫描和提高 ReID 频率，但不能向前跟随。
+- 已锁定目标时，干扰者一帧 ReID 高分不能直接抢走目标。
+- hard `STOP` 仍只作为搜索失败、风险过高或安全异常后的兜底终态。
+
+### 10.5 下一轮手机验收新增观察项
+
+debug 面板建议新增：
+
+```text
+trackId
+trackAge
+missedFrames
+targetBelief
+beliefReason
+activeTrackCount
+lockedTrackId
+```
+
+验收场景：
+
+1. 单人正常跟随：trackId 应稳定，targetBelief 应逐步升高。
+2. 目标离开：进入 motion_stop / search，lockedTrack 不应被立即替换。
+3. 干扰者进入：干扰者可形成新 track，但 targetBelief 不应快速超过恢复阈值。
+4. 目标返回：先成为疑似目标，连续稳定后恢复 `REACQUIRE_TARGET -> FOLLOW_CAUTION / FOLLOW_CONFIDENT`。
+5. 目标在场且干扰者穿越：lockedTrack 应尽量保持，必要时进入 `FOLLOW_CAUTION / IDENTITY_UNCERTAIN`，不冒进切换。
