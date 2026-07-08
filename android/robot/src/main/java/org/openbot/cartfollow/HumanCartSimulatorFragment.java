@@ -6,6 +6,7 @@ import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.app.Activity;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -24,6 +25,9 @@ import java.util.List;
 import java.util.Locale;
 import org.jetbrains.annotations.NotNull;
 import org.openbot.R;
+import org.openbot.cartfollow.diagnostics.CartFollowDiagnosticConfig;
+import org.openbot.cartfollow.diagnostics.CartFollowDiagnosticSaver;
+import org.openbot.cartfollow.diagnostics.CartFollowDiagnosticSession;
 import org.openbot.common.CameraFragment;
 import org.openbot.databinding.FragmentHumanCartSimulatorBinding;
 import org.openbot.env.ImageUtils;
@@ -72,6 +76,16 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private final TargetTrackManager targetTrackManager = new TargetTrackManager();
   private final IdentityBeliefAccumulator beliefAccumulator = new IdentityBeliefAccumulator();
   private ReIDCoordinator reidCoordinator;
+  private final CartFollowDiagnosticConfig diagnosticConfig = new CartFollowDiagnosticConfig();
+  private final CartFollowDiagnosticSaver diagnosticSaver = new CartFollowDiagnosticSaver();
+  private CartFollowDiagnosticSession diagnosticSession;
+  private boolean diagnosticActive = false;
+  private boolean targetEventAwaitingReturn = false;
+  private boolean showFullDebug = false;
+  private long lastDiagnosticFrameLogMs = 0L;
+  private long lastDiagnosticCropMs = 0L;
+  private long lastDiagnosticGalleryMs = 0L;
+  private Bitmap latestConfirmSnapshot;
 
   private final List<DrawBox> drawBoxes = new ArrayList<>();
   private int drawFrameWidth = 0;
@@ -141,12 +155,24 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     setAnalyserResolution(Enums.Preview.HD.getValue());
 
     binding.trackingOverlay.addCallback(canvas -> drawOverlay(canvas));
+    binding.btnDebugDetails.setOnClickListener(
+        v -> {
+          showFullDebug = !showFullDebug;
+          binding.btnDebugDetails.setText(showFullDebug ? "收起详情" : "调试详情");
+        });
+    resetTargetEventButton();
+    binding.btnTargetEvent.setOnClickListener(v -> recordTargetEvent());
 
     binding.btnConfirm.setOnClickListener(
         v -> {
           if (reidCoordinator != null) reidCoordinator.confirmGallery();
           int lockedTrackId = targetTrackManager.lockClosest(stateMachine.getMemory().getLastBbox());
           beliefAccumulator.lockTrack(lockedTrackId);
+          activateDiagnosticSession();
+          if (latestConfirmSnapshot != null) {
+            diagnosticSaver.saveGallerySnapshotAsync(
+                latestConfirmSnapshot, diagnosticSession, "confirmed_snapshot");
+          }
           stateMachine.confirm();
         });
     binding.btnRetake.setOnClickListener(
@@ -154,6 +180,8 @@ public class HumanCartSimulatorFragment extends CameraFragment {
           if (reidCoordinator != null) reidCoordinator.reset();
           targetTrackManager.reset();
           beliefAccumulator.reset();
+          stopDiagnosticSession();
+          startDiagnosticSession();
           stateMachine.retake();
         });
     binding.btnCancel.setOnClickListener(
@@ -161,6 +189,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
           if (reidCoordinator != null) reidCoordinator.reset();
           targetTrackManager.reset();
           beliefAccumulator.reset();
+          stopDiagnosticSession();
           stateMachine.cancel();
         });
 
@@ -172,12 +201,14 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             if (reidCoordinator != null) reidCoordinator.reset();
             targetTrackManager.reset();
             beliefAccumulator.reset();
+            startDiagnosticSession();
             stateMachine.startCapture();
           } else {
             binding.modelSpinner.setEnabled(true);
             if (reidCoordinator != null) reidCoordinator.reset();
             targetTrackManager.reset();
             beliefAccumulator.reset();
+            stopDiagnosticSession();
             stateMachine.cancel();
             resetUiToIdle();
           }
@@ -265,6 +296,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   @Override
   public synchronized void onPause() {
+    stopDiagnosticSession();
     handlerThread.quitSafely();
     try {
       handlerThread.join();
@@ -274,6 +306,12 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       e.printStackTrace();
     }
     super.onPause();
+  }
+
+  @Override
+  public void onDestroy() {
+    diagnosticSaver.shutdown();
+    super.onDestroy();
   }
 
   protected synchronized void runInBackground(final Runnable r) {
@@ -331,9 +369,12 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             targetTrackManager.update(
                 mappedRecognitions, frameW, frameH, SystemClock.elapsedRealtime());
             FollowState currentState = stateMachine.getState();
-            if (currentState == FollowState.CAPTURE_TARGET && reidCoordinator != null) {
-              reidCoordinator.collectInitializationCandidate(
-                  workingFrame, selectLargest(mappedRecognitions));
+            Detector.Recognition largestPerson = selectLargest(mappedRecognitions);
+            if (currentState == FollowState.CAPTURE_TARGET) {
+              if (reidCoordinator != null) {
+                reidCoordinator.collectInitializationCandidate(workingFrame, largestPerson);
+              }
+              maybeSaveGalleryCandidate(workingFrame, largestPerson);
             }
             TargetMatcher.MatchResult legacyMatch =
                 matcher.match(
@@ -369,8 +410,10 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             fr.behaviorDecision = decideBehavior(fr, frameW, frameH);
 
             updateDrawState(fr, frameW, frameH, sensorOrientation);
-            updateCommandText(commandForState(fr));
+            String commandText = commandForState(fr);
+            updateCommandText(commandText);
             float fps = lastProcessingTimeMs > 0 ? 1000f / lastProcessingTimeMs : 0f;
+            maybeSaveDiagnostics(workingFrame, fr, fps, commandText, frameW, frameH, sensorOrientation);
             updateDebugInfo(
                 fr.state,
                 fr.control,
@@ -538,6 +581,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
               boolean showConfirm = fr.state == FollowState.LOCKED_PENDING_CONFIRM;
               binding.confirmPanel.setVisibility(showConfirm ? View.VISIBLE : View.GONE);
               if (showConfirm && fr.snapshot != null) {
+                latestConfirmSnapshot = fr.snapshot;
                 binding.snapshotView.setImageBitmap(fr.snapshot);
               }
               boolean showCountdown = fr.state == FollowState.READY_TO_FOLLOW;
@@ -547,6 +591,158 @@ public class HumanCartSimulatorFragment extends CameraFragment {
                     fr.countdownSec >= 0 ? String.valueOf(fr.countdownSec) : "");
               }
             });
+  }
+
+  private void startDiagnosticSession() {
+    stopDiagnosticSession();
+    diagnosticSession = new CartFollowDiagnosticSession(requireContext().getApplicationContext());
+    diagnosticSession.initCsvFiles();
+    diagnosticActive = false;
+    targetEventAwaitingReturn = false;
+    latestConfirmSnapshot = null;
+    lastDiagnosticFrameLogMs = 0L;
+    lastDiagnosticCropMs = 0L;
+    lastDiagnosticGalleryMs = 0L;
+    resetTargetEventButton();
+  }
+
+  private void activateDiagnosticSession() {
+    if (diagnosticSession == null) {
+      startDiagnosticSession();
+    }
+    diagnosticActive = true;
+    targetEventAwaitingReturn = false;
+    String detectorName = getModel() == null ? "" : getModel().name;
+    boolean reidAvailable = reidCoordinator != null && reidCoordinator.isAvailable();
+    int gallerySize = reidCoordinator == null ? 0 : reidCoordinator.getGallerySize();
+    diagnosticSession.writeSessionInfo(
+        diagnosticConfig, detectorName, minConfidence, reidAvailable, gallerySize);
+    resetTargetEventButton();
+    Toast.makeText(
+            requireContext(),
+            "Diagnostic: " + diagnosticSession.sessionDir.getAbsolutePath(),
+            Toast.LENGTH_SHORT)
+        .show();
+  }
+
+  private void stopDiagnosticSession() {
+    if (diagnosticSession != null && diagnosticActive) {
+      diagnosticSaver.saveEventAsync(diagnosticSession, frameNum, "session_stop", "");
+    }
+    diagnosticActive = false;
+    diagnosticSession = null;
+    targetEventAwaitingReturn = false;
+    lastDiagnosticFrameLogMs = 0L;
+    lastDiagnosticCropMs = 0L;
+    lastDiagnosticGalleryMs = 0L;
+    resetTargetEventButton();
+  }
+
+  private void resetTargetEventButton() {
+    if (binding == null) return;
+    Activity activity = getActivity();
+    if (activity == null) return;
+    activity.runOnUiThread(
+        () -> {
+          if (binding == null) return;
+          binding.btnTargetEvent.setEnabled(diagnosticActive);
+          binding.btnTargetEvent.setText(
+              targetEventAwaitingReturn ? "目标回到画面" : "目标离开画面");
+        });
+  }
+
+  private void recordTargetEvent() {
+    if (!diagnosticActive || diagnosticSession == null) return;
+    String eventType = targetEventAwaitingReturn ? "target_return" : "target_left";
+    diagnosticSaver.saveEventAsync(diagnosticSession, frameNum, eventType, "");
+    targetEventAwaitingReturn = !targetEventAwaitingReturn;
+    resetTargetEventButton();
+  }
+
+  private void maybeSaveDiagnostics(
+      Bitmap workingFrame,
+      FollowStateMachine.FrameResult fr,
+      float fps,
+      String commandText,
+      int frameW,
+      int frameH,
+      int sensorOrientation) {
+    if (!diagnosticActive || diagnosticSession == null || fr == null) return;
+    long now = SystemClock.elapsedRealtime();
+    boolean shouldLog =
+        lastDiagnosticFrameLogMs == 0L
+            || now - lastDiagnosticFrameLogMs >= diagnosticConfig.frameLogIntervalMs;
+    boolean shouldSaveCrop =
+        lastDiagnosticCropMs == 0L || now - lastDiagnosticCropMs >= diagnosticConfig.cropIntervalMs;
+    if (!shouldLog && !shouldSaveCrop) return;
+    if (shouldLog) lastDiagnosticFrameLogMs = now;
+    if (shouldSaveCrop) lastDiagnosticCropMs = now;
+
+    Detector.Recognition locked = recognitionForTrack(targetTrackManager.getLockedTrack());
+    TargetTrack suspectedTrack = targetTrackManager.getTrackById(targetTrackManager.getSuspectedTrackId());
+    Detector.Recognition suspected = recognitionForTrack(suspectedTrack);
+    Detector.Recognition bestReid =
+        reidCoordinator == null ? null : reidCoordinator.getLastBestCandidate();
+    diagnosticSaver.saveFrameAsync(
+        workingFrame,
+        diagnosticSession,
+        diagnosticConfig,
+        frameNum,
+        frameW,
+        frameH,
+        sensorOrientation,
+        fps,
+        fr.persons == null ? 0 : fr.persons.size(),
+        fr.state.name(),
+        fr.behaviorDecision,
+        commandText,
+        fr.identityEvidence,
+        locked,
+        suspected,
+        bestReid,
+        shouldSaveCrop);
+  }
+
+  private void maybeSaveGalleryCandidate(Bitmap frame, Detector.Recognition candidate) {
+    if (diagnosticSession == null || frame == null || candidate == null) return;
+    if (candidate.getLocation() == null) return;
+    long now = SystemClock.elapsedRealtime();
+    if (lastDiagnosticGalleryMs != 0L
+        && now - lastDiagnosticGalleryMs < diagnosticConfig.cropIntervalMs) {
+      return;
+    }
+    Bitmap crop = cropPerson(frame, candidate.getLocation(), diagnosticConfig.paddingRatio);
+    if (crop == null) return;
+    lastDiagnosticGalleryMs = now;
+    diagnosticSaver.saveGallerySnapshotAsync(
+        crop, diagnosticSession, "gallery_candidate_" + frameNum);
+    crop.recycle();
+  }
+
+  private static Detector.Recognition recognitionForTrack(TargetTrack track) {
+    return track == null || !track.isVisible() ? null : track.recognition;
+  }
+
+  private static Bitmap cropPerson(Bitmap frame, RectF bbox, float paddingRatio) {
+    if (frame == null || bbox == null) return null;
+    float padX = bbox.width() * paddingRatio;
+    float padY = bbox.height() * paddingRatio;
+    int left = clamp((int) (bbox.left - padX), 0, frame.getWidth() - 1);
+    int top = clamp((int) (bbox.top - padY), 0, frame.getHeight() - 1);
+    int right = clamp((int) (bbox.right + padX), left + 1, frame.getWidth());
+    int bottom = clamp((int) (bbox.bottom + padY), top + 1, frame.getHeight());
+    int width = right - left;
+    int height = bottom - top;
+    if (width <= 0 || height <= 0) return null;
+    try {
+      return Bitmap.createBitmap(frame, left, top, width, height);
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  private static int clamp(int value, int min, int max) {
+    return Math.max(min, Math.min(max, value));
   }
 
   private void updateDebugInfo(
@@ -600,7 +796,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       behaviorLine = "action=-\nactionReason=-\nsafetyBlock=-\nactionConf=0.00";
     }
     String identityLine = buildIdentityDebugLine(identityEvidence);
-    String info =
+    String fullInfo =
         String.format(
             Locale.US,
             "state=%s\nforward=%.2f\nturn=%.2f\nleft=%.2f\nright=%.2f\npersons=%d\nfps=%.1f\n%s\n%s\n%s",
@@ -614,6 +810,25 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             distLine,
             behaviorLine,
             identityLine);
+    String compactInfo =
+        String.format(
+            Locale.US,
+            "fps=%.1f\nstate=%s\naction=%s\npersons=%d\ntrack=%d locked=%d suspected=%d\nbelief=%.2f\nbest=%.3f margin=%.3f",
+            fps,
+            state.name(),
+            behaviorDecision == null ? "-" : behaviorDecision.selectedAction.name(),
+            persons,
+            identityEvidence == null ? -1 : identityEvidence.trackId,
+            identityEvidence == null ? -1 : identityEvidence.lockedTrackId,
+            identityEvidence == null ? -1 : identityEvidence.suspectedTrackId,
+            identityEvidence == null ? 0f : identityEvidence.targetBelief,
+            identityEvidence == null || identityEvidence.reidMatch == null
+                ? 0f
+                : identityEvidence.reidMatch.bestScore,
+            identityEvidence == null || identityEvidence.reidMatch == null
+                ? 0f
+                : identityEvidence.reidMatch.margin);
+    String info = showFullDebug ? fullInfo : compactInfo;
     requireActivity().runOnUiThread(() -> binding.debugInfo.setText(info));
   }
 

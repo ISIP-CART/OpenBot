@@ -660,3 +660,105 @@ $env:Path="$env:JAVA_HOME\bin;$env:Path"
 3. 目标离开后干扰者进入：干扰者可形成新 track，但不应快速获得恢复 `FOLLOW` 的 belief。
 4. 目标返回：应先成为 suspected track，经多帧 belief 稳定后恢复到 `REACQUIRE_TARGET / FOLLOW_CAUTION`。
 5. 目标在场时干扰者穿越：locked track 不应被一帧高 ReID 分数抢走；必要时进入 `FOLLOW_CAUTION / IDENTITY_UNCERTAIN`。
+
+---
+
+## 12. Phase C 诊断采集与 UI 简化（2026-07-08）
+
+### 12.1 实现目的
+
+阶段 C 首轮实机验收后，仍观察到两类问题：
+
+- 目标回到画面后长期停留在黄框，迟迟不转为绿框；
+- 非目标人物偶发转绿，表现为疑似跟错人。
+
+本轮没有继续修改 ReID、belief、relock 或状态机阈值，而是先在 Human Cart Simulator 中加入诊断采集能力，用真实日志解释问题发生在哪个环节。
+
+### 12.2 新增代码
+
+| 文件 | 作用 |
+|------|------|
+| `cartfollow/diagnostics/CartFollowDiagnosticConfig.java` | 管理 frame log、crop、overlay 采样间隔和 JPEG 参数。 |
+| `cartfollow/diagnostics/CartFollowDiagnosticSession.java` | 创建 `cartfollow_diagnostics/<session_id>/`，初始化 CSV、gallery/crops/overlays 目录和 `session_info.json`。 |
+| `cartfollow/diagnostics/CartFollowDiagnosticSaver.java` | 单线程异步写 `frame_log.csv`、`identity_log.csv`、`events.csv`，并低频保存 locked/suspected/best_reid crop 与初始化 gallery snapshot。 |
+| `HumanCartSimulatorFragment.java` | 接入诊断 session 生命周期、人工事件按钮、低频日志保存和简洁/完整 debug 切换。 |
+| `fragment_human_cart_simulator.xml` | 新增 `调试详情` 按钮和 `目标离开画面 / 目标回到画面` 事件按钮。 |
+
+### 12.3 输出目录与文件
+
+输出位置：
+
+```text
+/sdcard/Android/data/org.openbot/files/Pictures/cartfollow_diagnostics/
+└── cart_diag_<yyyyMMdd_HHmmss>/
+    ├── frame_log.csv
+    ├── identity_log.csv
+    ├── events.csv
+    ├── session_info.json
+    ├── crops/
+    ├── gallery/
+    └── overlays/
+```
+
+`frame_log.csv` 记录每 200 ms 左右的状态机、行为动作、人类指令和人数：
+
+```text
+session_id,frame_id,timestamp_ms,elapsed_ms,fps,num_persons,
+follow_state,selected_action,action_reason,safety_block_reason,command_text
+```
+
+`identity_log.csv` 记录每 200 ms 左右的 track、ReID、bbox gate、belief 和 crop 路径：
+
+```text
+session_id,frame_id,timestamp_ms,
+track_id,locked_track_id,suspected_track_id,active_track_count,
+track_age,missed_frames,best_score,second_score,margin,gallery_size,
+weak_ok,mid_ok,strong_ok,bbox_default_ok,bbox_strict_ok,prediction_ok,
+target_belief,belief_stable_frames,belief_uncertain_frames,
+candidate_switch_count,belief_reason,reid_reason,
+locked_crop_path,suspected_crop_path,best_reid_crop_path
+```
+
+`events.csv` 记录人工事件：
+
+```text
+session_id,timestamp_ms,frame_id,event_type,note
+```
+
+当前人工事件只包括：
+
+- `target_left`
+- `target_return`
+- `session_stop`
+
+### 12.4 UI 行为
+
+- 默认左上角只显示简洁 debug：`fps / state / action / persons / track / locked / suspected / belief / best / margin`。
+- 点击 `调试详情` 后显示原完整 debug，再次点击 `收起详情` 回到简洁显示。
+- `目标离开画面` 按钮在目标确认前禁用。
+- 用户点击 `确认` 后诊断 session 正式启用，事件按钮可用。
+- 第一次点击事件按钮写入 `target_left`，按钮文本切换为 `目标回到画面`。
+- 第二次点击写入 `target_return`，按钮文本切回 `目标离开画面`。
+- 该按钮只写日志，不改变状态机、ReID、track、belief 或 action。
+
+### 12.5 构建验证
+
+构建命令：
+
+```powershell
+$env:JAVA_HOME='D:\Java\jdk-17'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过，生成 debug APK。构建日志仍包含 TensorFlow Lite manifest namespace warning、Kotlin/Javac target warning 和若干 deprecated API warning，均未阻塞构建。
+
+### 12.6 手机验收重点
+
+1. Start 后、确认目标前，事件按钮应禁用。
+2. 确认目标后，事件按钮启用，默认显示 `目标离开画面`。
+3. 目标离开时点击一次，`events.csv` 应出现 `target_left`。
+4. 目标返回时再点击一次，`events.csv` 应出现 `target_return`。
+5. 默认左上角不再显示大块完整 debug；点击 `调试详情` 后可展开完整字段。
+6. Stop / Cancel / Retake / 页面暂停后，诊断 session 应关闭，按钮禁用并复位。
+7. 导出诊断目录后，应能用 `events.csv` 附近的 `frame_log.csv` 和 `identity_log.csv` 判断黄框不转绿或非目标转绿的原因。
