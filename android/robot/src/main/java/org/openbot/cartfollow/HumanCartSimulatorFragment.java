@@ -45,6 +45,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private static final int COLOR_CANDIDATE = 1;
   private static final int COLOR_NORMAL = 2;
   private static final int COLOR_FAIL = 3;
+  private static final int RECOVERY_RELOCK_MIN_FRAMES = 2;
 
   private FragmentHumanCartSimulatorBinding binding;
   private Handler handler;
@@ -79,12 +80,15 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private final CartFollowDiagnosticConfig diagnosticConfig = new CartFollowDiagnosticConfig();
   private final CartFollowDiagnosticSaver diagnosticSaver = new CartFollowDiagnosticSaver();
   private CartFollowDiagnosticSession diagnosticSession;
+  private boolean diagnosticEnabled = false;
   private boolean diagnosticActive = false;
   private boolean targetEventAwaitingReturn = false;
   private boolean showFullDebug = false;
   private long lastDiagnosticFrameLogMs = 0L;
   private long lastDiagnosticCropMs = 0L;
   private long lastDiagnosticGalleryMs = 0L;
+  private int recoveryRelockTrackId = -1;
+  private int recoveryRelockFrames = 0;
   private Bitmap latestConfirmSnapshot;
 
   private final List<DrawBox> drawBoxes = new ArrayList<>();
@@ -162,6 +166,15 @@ public class HumanCartSimulatorFragment extends CameraFragment {
         });
     resetTargetEventButton();
     binding.btnTargetEvent.setOnClickListener(v -> recordTargetEvent());
+    binding.diagnosticSwitch.setChecked(false);
+    binding.diagnosticSwitch.setOnClickListener(
+        v -> {
+          diagnosticEnabled = binding.diagnosticSwitch.isChecked();
+          if (!diagnosticEnabled) {
+            stopDiagnosticSession();
+          }
+          resetTargetEventButton();
+        });
 
     binding.btnConfirm.setOnClickListener(
         v -> {
@@ -169,7 +182,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
           int lockedTrackId = targetTrackManager.lockClosest(stateMachine.getMemory().getLastBbox());
           beliefAccumulator.lockTrack(lockedTrackId);
           activateDiagnosticSession();
-          if (latestConfirmSnapshot != null) {
+          if (diagnosticActive && diagnosticSession != null && latestConfirmSnapshot != null) {
             diagnosticSaver.saveGallerySnapshotAsync(
                 latestConfirmSnapshot, diagnosticSession, "confirmed_snapshot");
           }
@@ -180,6 +193,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
           if (reidCoordinator != null) reidCoordinator.reset();
           targetTrackManager.reset();
           beliefAccumulator.reset();
+          resetRecoveryRelock();
           stopDiagnosticSession();
           startDiagnosticSession();
           stateMachine.retake();
@@ -189,6 +203,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
           if (reidCoordinator != null) reidCoordinator.reset();
           targetTrackManager.reset();
           beliefAccumulator.reset();
+          resetRecoveryRelock();
           stopDiagnosticSession();
           stateMachine.cancel();
         });
@@ -201,6 +216,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             if (reidCoordinator != null) reidCoordinator.reset();
             targetTrackManager.reset();
             beliefAccumulator.reset();
+            resetRecoveryRelock();
             startDiagnosticSession();
             stateMachine.startCapture();
           } else {
@@ -208,6 +224,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
             if (reidCoordinator != null) reidCoordinator.reset();
             targetTrackManager.reset();
             beliefAccumulator.reset();
+            resetRecoveryRelock();
             stopDiagnosticSession();
             stateMachine.cancel();
             resetUiToIdle();
@@ -410,6 +427,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
                 stateMachine.onFrame(
                     mappedRecognitions, workingFrame, frameW, frameH, sensorOrientation, identity);
             fr.behaviorDecision = decideBehavior(fr, frameW, frameH);
+            maybeRelockAfterRecovery(fr);
 
             updateDrawState(fr, frameW, frameH, sensorOrientation);
             String commandText = commandForState(fr);
@@ -434,6 +452,70 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   private void updateCropImageInfo() {
     sensorOrientation = 90 - ImageUtils.getScreenOrientation(requireActivity());
     recreateNetwork(getModel(), getDevice(), getNumThreads());
+  }
+
+  private void maybeRelockAfterRecovery(FollowStateMachine.FrameResult fr) {
+    if (fr == null || fr.identityEvidence == null || fr.behaviorDecision == null) {
+      resetRecoveryRelock();
+      return;
+    }
+    IdentityEvidence identity = fr.identityEvidence;
+    if (!isRelockState(fr.state)
+        || !isRelockAction(fr.behaviorDecision.selectedAction)
+        || identity.trackId < 0
+        || identity.trackId == identity.lockedTrackId
+        || !passesRelockMotionGate(identity)) {
+      resetRecoveryRelock();
+      return;
+    }
+
+    if (recoveryRelockTrackId != identity.trackId) {
+      recoveryRelockTrackId = identity.trackId;
+      recoveryRelockFrames = 1;
+      return;
+    }
+    recoveryRelockFrames++;
+    if (recoveryRelockFrames < RECOVERY_RELOCK_MIN_FRAMES) return;
+
+    if (targetTrackManager.lockTrack(identity.trackId, "relock_after_recovery")) {
+      beliefAccumulator.lockTrack(identity.trackId);
+      fr.behaviorDecision =
+          new BehaviorDecisionResult(
+              fr.behaviorDecision.state,
+              fr.behaviorDecision.selectedAction,
+              appendActionReason(fr.behaviorDecision.actionReason, "relock_after_recovery"),
+              fr.behaviorDecision.safetyBlockReason,
+              fr.behaviorDecision.confidence,
+              fr.behaviorDecision.distanceEvidence,
+              fr.behaviorDecision.traversabilityEvidence);
+    }
+    resetRecoveryRelock();
+  }
+
+  private static boolean isRelockState(FollowState state) {
+    return state == FollowState.REACQUIRE_TARGET
+        || state == FollowState.READY_TO_FOLLOW
+        || state == FollowState.FOLLOW_CAUTION
+        || state == FollowState.FOLLOW;
+  }
+
+  private static boolean isRelockAction(BehaviorAction action) {
+    return action == BehaviorAction.FOLLOW_CAUTION || action == BehaviorAction.FOLLOW_SLOW;
+  }
+
+  private static boolean passesRelockMotionGate(IdentityEvidence identity) {
+    return identity.bboxDefaultOk() || identity.predictionOk();
+  }
+
+  private void resetRecoveryRelock() {
+    recoveryRelockTrackId = -1;
+    recoveryRelockFrames = 0;
+  }
+
+  private static String appendActionReason(String reason, String addition) {
+    if (reason == null || reason.isEmpty()) return addition;
+    if (reason.contains(addition)) return reason;
+    return reason + "|" + addition;
   }
 
   private synchronized void updateDrawState(
@@ -597,6 +679,10 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private void startDiagnosticSession() {
     stopDiagnosticSession();
+    if (!diagnosticEnabled) {
+      resetDiagnosticState();
+      return;
+    }
     diagnosticSession = new CartFollowDiagnosticSession(requireContext().getApplicationContext());
     diagnosticSession.initCsvFiles();
     diagnosticActive = false;
@@ -609,9 +695,14 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   }
 
   private void activateDiagnosticSession() {
+    if (!diagnosticEnabled) {
+      resetDiagnosticState();
+      return;
+    }
     if (diagnosticSession == null) {
       startDiagnosticSession();
     }
+    if (diagnosticSession == null) return;
     diagnosticActive = true;
     targetEventAwaitingReturn = false;
     String detectorName = getModel() == null ? "" : getModel().name;
@@ -634,9 +725,13 @@ public class HumanCartSimulatorFragment extends CameraFragment {
   }
 
   private void stopDiagnosticSession() {
-    if (diagnosticSession != null && diagnosticActive) {
+    if (diagnosticEnabled && diagnosticSession != null && diagnosticActive) {
       diagnosticSaver.saveEventAsync(diagnosticSession, frameNum, "session_stop", "");
     }
+    resetDiagnosticState();
+  }
+
+  private void resetDiagnosticState() {
     diagnosticActive = false;
     diagnosticSession = null;
     targetEventAwaitingReturn = false;
@@ -653,14 +748,14 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     activity.runOnUiThread(
         () -> {
           if (binding == null) return;
-          binding.btnTargetEvent.setEnabled(diagnosticActive);
+          binding.btnTargetEvent.setEnabled(diagnosticEnabled && diagnosticActive);
           binding.btnTargetEvent.setText(
               targetEventAwaitingReturn ? "目标回到画面" : "目标离开画面");
         });
   }
 
   private void recordTargetEvent() {
-    if (!diagnosticActive || diagnosticSession == null) return;
+    if (!diagnosticEnabled || !diagnosticActive || diagnosticSession == null) return;
     String eventType = targetEventAwaitingReturn ? "target_return" : "target_left";
     diagnosticSaver.saveEventAsync(diagnosticSession, frameNum, eventType, "");
     targetEventAwaitingReturn = !targetEventAwaitingReturn;
@@ -675,7 +770,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
       int frameW,
       int frameH,
       int sensorOrientation) {
-    if (!diagnosticActive || diagnosticSession == null || fr == null) return;
+    if (!diagnosticEnabled || !diagnosticActive || diagnosticSession == null || fr == null) return;
     long now = SystemClock.elapsedRealtime();
     boolean shouldLog =
         lastDiagnosticFrameLogMs == 0L
@@ -713,7 +808,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private void maybeSaveGalleryCandidate(
       Bitmap frame, Detector.Recognition candidate, int sensorOrientation) {
-    if (diagnosticSession == null || frame == null || candidate == null) return;
+    if (!diagnosticEnabled || diagnosticSession == null || frame == null || candidate == null) return;
     if (candidate.getLocation() == null) return;
     long now = SystemClock.elapsedRealtime();
     if (lastDiagnosticGalleryMs != 0L
@@ -853,7 +948,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
 
   private String buildIdentityDebugLine(IdentityEvidence identity) {
     if (identity == null) {
-      return "reidAvailable=false\nreidCrop=upright\ngallerySize=0\nbestScore=0.000\nsecondScore=0.000\nmargin=0.000\nweak/mid/strong=false/false/false\nbboxDefault=false bboxStrict=false prediction=false\nstableMatchCount=0\ncandidateSwitchCount=0\nreidLatencyMs=0\nreidReason=-\nactiveTrackCount=0\ntrackId=-1 lockedTrackId=-1 suspectedTrackId=-1\ntrackAge=0 missedFrames=0\nbelief=0.00 beliefStable=0 beliefUncertain=0\nbeliefReason=-";
+      return "reidAvailable=false\nreidCrop=upright\ngallerySize=0\nbestScore=0.000\nsecondScore=0.000\nmargin=0.000\nweak/mid/strong=false/false/false\nbboxLoose=false bboxDefault=false bboxStrict=false prediction=false\nstableMatchCount=0\ncandidateSwitchCount=0\nreidLatencyMs=0\nreidReason=-\nactiveTrackCount=0\ntrackId=-1 lockedTrackId=-1 suspectedTrackId=-1\ntrackAge=0 missedFrames=0\nbelief=0.00 beliefStable=0 beliefUncertain=0\nbeliefReason=-";
     }
     ReIDMatchResult reid = identity.reidMatch;
     BboxContinuityEvidence bbox = identity.bboxContinuity;
@@ -866,7 +961,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
     String reason = reid == null ? identity.reason : reid.reason;
     return String.format(
         Locale.US,
-        "reidAvailable=%s\nreidCrop=upright\ngallerySize=%d\nbestScore=%.3f\nsecondScore=%.3f\nmargin=%.3f\nweak/mid/strong=%s/%s/%s\nbboxDefault=%s bboxStrict=%s prediction=%s\nstableMatchCount=%d\ncandidateSwitchCount=%d\nreidLatencyMs=%d\nreidReason=%s\nactiveTrackCount=%d\ntrackId=%d lockedTrackId=%d suspectedTrackId=%d\ntrackAge=%d missedFrames=%d\nbelief=%.2f reidC=%.2f bboxC=%.2f predC=%.2f switchP=%.2f\nbeliefStable=%d beliefUncertain=%d\nbeliefReason=%s",
+        "reidAvailable=%s\nreidCrop=upright\ngallerySize=%d\nbestScore=%.3f\nsecondScore=%.3f\nmargin=%.3f\nweak/mid/strong=%s/%s/%s\nbboxLoose=%s bboxDefault=%s bboxStrict=%s prediction=%s\nstableMatchCount=%d\ncandidateSwitchCount=%d\nreidLatencyMs=%d\nreidReason=%s\nactiveTrackCount=%d\ntrackId=%d lockedTrackId=%d suspectedTrackId=%d\ntrackAge=%d missedFrames=%d\nbelief=%.2f reidC=%.2f bboxC=%.2f predC=%.2f switchP=%.2f\nbeliefStable=%d beliefUncertain=%d\nbeliefReason=%s",
         reidAvailable,
         gallerySize,
         best,
@@ -875,6 +970,7 @@ public class HumanCartSimulatorFragment extends CameraFragment {
         identity.weakOk(),
         identity.midOk(),
         identity.strongOk(),
+        bbox != null && bbox.looseAdmissionOk,
         bbox != null && bbox.bboxDefaultOk,
         bbox != null && bbox.bboxStrictOk,
         bbox != null && bbox.predictionOk,

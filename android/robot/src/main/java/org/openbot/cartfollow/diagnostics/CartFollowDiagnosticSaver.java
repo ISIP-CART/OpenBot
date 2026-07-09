@@ -177,7 +177,7 @@ public class CartFollowDiagnosticSaver {
     String row =
         String.format(
             Locale.US,
-            "%s,%d,%d,%d,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%d,%s,%s,%s,%s,%s,%s,%.4f,%d,%d,%d,%s,%s,%s,%s,%s\n",
+            "%s,%d,%d,%d,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%d,%s,%s,%s,%s,%s,%s,%s,%.4f,%d,%d,%d,%s,%s,%s,%s,%s\n",
             csv(session.sessionId),
             frameNum,
             timestampMs,
@@ -194,6 +194,7 @@ public class CartFollowDiagnosticSaver {
             id.weakOk ? "1" : "0",
             id.midOk ? "1" : "0",
             id.strongOk ? "1" : "0",
+            id.bboxLooseAdmissionOk ? "1" : "0",
             id.bboxDefaultOk ? "1" : "0",
             id.bboxStrictOk ? "1" : "0",
             id.predictionOk ? "1" : "0",
@@ -314,6 +315,7 @@ public class CartFollowDiagnosticSaver {
     final boolean weakOk;
     final boolean midOk;
     final boolean strongOk;
+    final boolean bboxLooseAdmissionOk;
     final boolean bboxDefaultOk;
     final boolean bboxStrictOk;
     final boolean predictionOk;
@@ -340,6 +342,7 @@ public class CartFollowDiagnosticSaver {
       weakOk = identity != null && identity.weakOk();
       midOk = identity != null && identity.midOk();
       strongOk = identity != null && identity.strongOk();
+      bboxLooseAdmissionOk = bbox != null && bbox.looseAdmissionOk;
       bboxDefaultOk = bbox != null && bbox.bboxDefaultOk;
       bboxStrictOk = bbox != null && bbox.bboxStrictOk;
       predictionOk = bbox != null && bbox.predictionOk;
