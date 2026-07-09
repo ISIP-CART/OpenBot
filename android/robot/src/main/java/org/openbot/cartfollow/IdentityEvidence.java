@@ -152,6 +152,10 @@ public class IdentityEvidence {
     return bboxContinuity != null && bboxContinuity.bboxStrictOk;
   }
 
+  public boolean looseAdmissionOk() {
+    return bboxContinuity != null && bboxContinuity.looseAdmissionOk;
+  }
+
   public boolean predictionOk() {
     return bboxContinuity != null && bboxContinuity.predictionOk;
   }

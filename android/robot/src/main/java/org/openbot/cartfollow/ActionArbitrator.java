@@ -23,7 +23,15 @@ public class ActionArbitrator {
     }
     if (state == FollowState.REACQUIRE_TARGET) {
       float conf = identity == null ? 0f : identity.confidence;
-      return result(state, BehaviorAction.REACQUIRE_HOLD, "reacquire_confirming", null, conf);
+      String reason =
+          identity != null
+                  && identity.looseAdmissionOk()
+                  && !identity.bboxDefaultOk()
+                  && !identity.predictionOk()
+                  && identity.trackId != identity.lockedTrackId
+              ? "motion_gate_failed"
+              : "reacquire_confirming";
+      return result(state, BehaviorAction.REACQUIRE_HOLD, reason, null, conf);
     }
     if (state == FollowState.IDENTITY_UNCERTAIN) {
       float conf = identity == null ? 0f : identity.confidence;

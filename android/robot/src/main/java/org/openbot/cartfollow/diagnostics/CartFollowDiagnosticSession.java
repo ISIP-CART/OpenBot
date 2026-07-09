@@ -22,7 +22,7 @@ public class CartFollowDiagnosticSession {
   private static final String IDENTITY_LOG_HEADER =
       "session_id,frame_id,timestamp_ms,track_id,locked_track_id,suspected_track_id,"
           + "active_track_count,track_age,missed_frames,best_score,second_score,margin,"
-          + "gallery_size,weak_ok,mid_ok,strong_ok,bbox_default_ok,bbox_strict_ok,"
+          + "gallery_size,weak_ok,mid_ok,strong_ok,bbox_loose_admission_ok,bbox_default_ok,bbox_strict_ok,"
           + "prediction_ok,target_belief,belief_stable_frames,belief_uncertain_frames,"
           + "candidate_switch_count,belief_reason,reid_reason,locked_crop_path,"
           + "suspected_crop_path,best_reid_crop_path";

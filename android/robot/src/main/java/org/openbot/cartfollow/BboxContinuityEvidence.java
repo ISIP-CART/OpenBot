@@ -11,11 +11,16 @@ public class BboxContinuityEvidence {
   public static final float STRICT_X_MAX = 0.18f;
   public static final float STRICT_AREA_MIN = 0.60f;
   public static final float STRICT_AREA_MAX = 1.67f;
+  public static final float LOOSE_CENTER_MAX = 0.36f;
+  public static final float LOOSE_X_MAX = 0.36f;
+  public static final float LOOSE_AREA_MIN = 0.35f;
+  public static final float LOOSE_AREA_MAX = 2.80f;
 
   public final float centerJumpRatio;
   public final float xJumpRatio;
   public final float areaRatio;
   public final float predictionError;
+  public final boolean looseAdmissionOk;
   public final boolean bboxDefaultOk;
   public final boolean bboxStrictOk;
   public final boolean predictionOk;
@@ -31,6 +36,11 @@ public class BboxContinuityEvidence {
     this.xJumpRatio = xJumpRatio;
     this.areaRatio = areaRatio;
     this.predictionError = predictionError;
+    this.looseAdmissionOk =
+        centerJumpRatio <= LOOSE_CENTER_MAX
+            && xJumpRatio <= LOOSE_X_MAX
+            && areaRatio >= LOOSE_AREA_MIN
+            && areaRatio <= LOOSE_AREA_MAX;
     this.bboxDefaultOk =
         centerJumpRatio <= DEFAULT_CENTER_MAX
             && xJumpRatio <= DEFAULT_X_MAX

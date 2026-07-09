@@ -335,7 +335,8 @@ public class FollowStateMachine {
         updateEvidenceCounters(id, m, safePersons);
         Recognition selected = selectedCandidate(id, m);
         if (selected != null
-            && (strongStrictStreak >= UNCERTAIN_RECOVER_FRAMES
+            && (identityAdmissionReady(id)
+                || strongStrictStreak >= UNCERTAIN_RECOVER_FRAMES
                 || midDefaultStreak >= UNCERTAIN_RECOVER_FRAMES)) {
           state = FollowState.REACQUIRE_TARGET;
           matchCount = 0;
@@ -433,7 +434,7 @@ public class FollowStateMachine {
     if (id != null && id.hasBelief()) {
       return id.beliefConfirmed()
           && id.beliefStableFrames >= 2
-          && (id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId);
+          && motionGateOk(id);
     }
     if (id != null && id.reidAvailable()) {
       return id.weakOk() && id.bboxDefaultOk();
@@ -444,8 +445,7 @@ public class FollowStateMachine {
   private boolean followCaution(
       IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
     if (id != null && id.hasBelief()) {
-      return id.beliefCaution()
-          && (id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId);
+      return id.beliefCaution() && motionGateOk(id);
     }
     if (id != null && id.reidAvailable()) {
       return id.bboxDefaultOk() && (id.weakOk() || id.midOk());
@@ -458,7 +458,7 @@ public class FollowStateMachine {
     if (id != null && id.hasBelief()) {
       return id.beliefConfirmed()
           && id.beliefStableFrames >= 3
-          && (id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId);
+          && motionGateOk(id);
     }
     if (id != null && id.reidAvailable()) {
       return (id.strongOk() && id.bboxDefaultOk()) || (id.midOk() && id.bboxStrictOk());
@@ -469,7 +469,7 @@ public class FollowStateMachine {
   private boolean lostRecoverReady(
       IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
     if (id != null && id.hasBelief()) {
-      return id.beliefConfirmed() && id.beliefStableFrames >= LOST_RECOVER_FRAMES;
+      return identityAdmissionReady(id);
     }
     if (id != null && id.reidAvailable()) {
       return strongStrictStreak >= LOST_RECOVER_FRAMES
@@ -488,7 +488,7 @@ public class FollowStateMachine {
   private void updateEvidenceCounters(
       IdentityEvidence id, TargetMatcher.MatchResult m, List<Recognition> persons) {
     if (id != null && id.hasBelief()) {
-      boolean safeBbox = id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId;
+      boolean safeBbox = motionGateOk(id);
       boolean midDefault = id.targetBelief >= IdentityBelief.BELIEF_CAUTION && safeBbox;
       boolean strongDefault = id.targetBelief >= IdentityBelief.BELIEF_CONFIRM && safeBbox;
       boolean strongStrict =
@@ -519,6 +519,18 @@ public class FollowStateMachine {
     strongDefaultStreak = strongDefault ? strongDefaultStreak + 1 : 0;
     strongStrictStreak = strongStrict ? strongStrictStreak + 1 : 0;
     if (midDefault || strongDefault || strongStrict) unstableStreak = 0;
+  }
+
+  private boolean identityAdmissionReady(IdentityEvidence id) {
+    if (id == null || !id.hasBelief()) return false;
+    boolean admission =
+        id.looseAdmissionOk() || id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId;
+    return id.beliefCaution() && id.beliefStableFrames >= UNCERTAIN_RECOVER_FRAMES && admission;
+  }
+
+  private boolean motionGateOk(IdentityEvidence id) {
+    if (id == null) return false;
+    return id.bboxDefaultOk() || id.predictionOk() || id.trackId == id.lockedTrackId;
   }
 
   private void resetEvidenceCounters() {

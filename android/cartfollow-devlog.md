@@ -3,7 +3,7 @@
 > 所属项目：自主跟随购物车原型
 > 代码位置：`dev/OpenBot/android/robot/src/main/java/org/openbot/cartfollow/`
 > 开发分支：`feature/human-cart-simulator`（Phase 1）/ `feature/distance-control`（Phase 2）/ `feature/person-crop-collector`（Phase 3 起）
-> 最后更新：2026-07-08
+> 最后更新：2026-07-09
 
 ---
 
@@ -87,7 +87,8 @@ Human Cart Simulator 是购物车跟随功能的上位机核心模块，在 Open
 | **Person Sequence Collector** | 已完成 | 可采集无人帧、多人检测、bbox、crop 和人工事件，用于 PC sequence replay |
 | **阶段 A 行为层** | 已完成并通过手机体验 | `Evidence -> BehaviorDecisionResult -> BehaviorAction -> HumanCommand` 已接入 Human Cart Simulator |
 | **阶段 B Android ReID** | 已完成首版并通过手机运行 | TFLite ReID 可运行，debug 字段正常，实机约 30 FPS；仍需阶段 C 轨迹与身份信念层抑制跟错人 |
-| **阶段 C 目标轨迹与身份信念层** | 已完成首版代码接入 | 新增短时 trackId、lockedTrackId、targetBelief 和 suspectedTrack debug，待手机验收调参 |
+| **阶段 C 目标轨迹与身份信念层** | 已完成策略修正版代码接入 | 已包含短时 trackId、lockedTrackId、targetBelief、suspectedTrack、locked ghost、suspected 滞回、loose/default/strict bbox gate、恢复后 relock 与非 locked 空间支持门控，待安装新版 APK 后复测 |
+| **诊断日志开关** | 已完成 | Human Cart Simulator 新增“记录日志”开关，默认关闭；关闭时不创建 diagnostics session，不写 CSV/JSON/crop/gallery/event |
 
 ### 2.2 Phase 3 首轮 ReID 实验结果（2026-07-06）
 
@@ -883,3 +884,138 @@ gallery_candidate_landscape_rate 是否保持 0
 ```
 
 如果 `candidate_switch_penalty` 和 `belief_high_bbox_failed` 下降，同时非目标转绿不增加，才说明策略改动真正改善了“目标返回后迟迟不转绿”和“干扰者偶发转绿”两个问题。
+
+---
+
+## 15. Phase C 下一轮策略版本：track/bbox gate 小步修正（2026-07-08）
+
+### 15.1 开发定位
+
+阶段 C 首版已经接入 `TargetTrackManager + IdentityBeliefAccumulator`，下一轮不再新增大架构，而是优化 track 粘性、locked/suspected 保护和 bbox gate 的状态化使用。
+
+状态更新：本节为 2026-07-08 的实施计划，2026-07-09 已完成代码接入；最新实现状态见第 16 节。
+
+本轮不做：
+
+```text
+更换 ReID 模型
+启用 dynamic gallery
+全局放宽 bbox gate
+接通真实底盘前进
+优先做复杂避障
+```
+
+### 15.2 计划代码点（已在第 16 节落地）
+
+| 文件 | 改动 |
+|------|------|
+| `TargetTrackManager.java` | 增加 locked track ghost memory、suspected track 最小滞回、疑似目标替换门槛。 |
+| `BboxContinuityEvidence.java` | 在 default / strict 之外新增 loose admission gate。 |
+| `IdentityBeliefAccumulator.java` | 分离 identity belief 与 motion permission；belief 高但 bbox failed 时保留 suspected，不直接清零。 |
+| `FollowStateMachine.java` | 在 `IDENTITY_UNCERTAIN / SEARCH / REACQUIRE_TARGET` 使用 admission/confirm/motion 分层恢复。 |
+| diagnostics/debug 字段 | 输出 `loose_admission_only / motion_gate_failed / suspected_dwell_hold / locked_ghost_reference` 等 reason。 |
+
+### 15.3 策略口径
+
+恢复链路固定为：
+
+```text
+loose admission
+  -> suspectedTrack
+  -> default confirm
+  -> REACQUIRE_TARGET
+  -> strict/default motion gate
+  -> FOLLOW_CAUTION / FOLLOW
+```
+
+具体原则：
+
+- loose gate 只允许进入 suspected/reacquire，不允许直接触发前进。
+- `FOLLOW / FOLLOW_CAUTION` 继续使用 default/strict bbox gate、prediction 或 locked track 保护，保持运动门槛保守。
+- `IDENTITY_UNCERTAIN / SEARCH` 可以接纳 loose admission 的疑似目标，但 action 仍为 `MOTION_STOP / LOCAL_SEARCH`。
+- `belief 高 + bbox failed` 表示身份可能正确但运动暂不安全，应保留 belief 或轻微衰减，并保持 `REACQUIRE_HOLD / MOTION_STOP`。
+- hard `STOP` 仍只由搜索超时、急停、通信异常、高风险障碍或人工取消触发。
+
+### 15.4 复测场景
+
+下一轮 APK 构建后采集 4 段短日志，每段 30-60 秒：
+
+1. 目标离开后原目标返回。
+2. 目标离开后干扰者进入。
+3. 目标在场时干扰者穿越。
+4. 目标短遮挡、蹲下或局部可见。
+
+PC compare 验收指标：
+
+```text
+recovered_rate 不下降；
+mean_ms_to_follow 下降或不恶化；
+not_recovered_in_window 减少；
+candidate_switch_penalty 下降；
+belief_high_bbox_failed 下降；
+非目标转绿不增加；
+hard_stop_count 不增加；
+gallery_candidate_landscape_rate 保持 0。
+```
+
+---
+
+## 16. Phase C relock、空间支持门控与日志开关实现（2026-07-09）
+
+### 16.1 本轮实现状态
+
+本轮 Android 代码已完成接入，目标是修正 2026-07-09 新采集数据暴露的两个问题：目标返回后新 track 没有晋升为 locked track，以及干扰者在没有 bbox / ghost 空间支持时仍可能靠 ReID 抬高 belief。
+
+本轮仍保持边界不变：
+
+```text
+不更换 ReID 模型
+不启用 dynamic gallery
+不开放真实底盘前进
+不改 ControlGenerator 的真实底盘控制路径
+不提前引入复杂避障
+```
+
+### 16.2 恢复后 relock
+
+- 非 locked track 在 `REACQUIRE_TARGET / READY_TO_FOLLOW / FOLLOW_CAUTION / FOLLOW` 的安全恢复路径中，如果连续通过 motion gate，并在 `FOLLOW_CAUTION / FOLLOW_SLOW` 等保守动作下稳定至少 2 帧，可以晋升为新的 `lockedTrackId`。
+- relock 成功后同步调用 `IdentityBeliefAccumulator.lockTrack(newTrackId)`，清空旧 suspected track。
+- debug / diagnostic reason 输出 `relock_after_recovery`，用于 PC 侧确认目标返回后是否真正完成重新锁定。
+- 普通 `IDENTITY_UNCERTAIN` 中单帧高 ReID 分数不允许直接 relock。
+
+### 16.3 非 locked 空间支持门控
+
+- 非 locked track 只有满足 `bboxLoose / bboxDefault / prediction / nearLockedGhost` 之一，才允许成为 suspected target。
+- 如果只有 ReID 高分但空间支持全 false，记录 `reid_interest_no_spatial_support` 或 `spatial_support_missing`。
+- 无空间支持时允许保留低强度观察信号，但 belief 不得升到 caution / confirm 阈值，也不能触发 suspected 或 FOLLOW。
+- `candidateSwitchCount` 只在真正选中或切换 suspected / selected track 时增长，减少“观察到高分干扰者”导致的噪声。
+
+### 16.4 诊断日志开关
+
+- `fragment_human_cart_simulator.xml` 底部控制区新增 `diagnostic_switch`，文案为“记录日志”，默认关闭。
+- `HumanCartSimulatorFragment` 新增 `diagnosticEnabled` 状态。
+- 日志关闭时，`startDiagnosticSession()` 和 `activateDiagnosticSession()` 直接返回，不创建 `cartfollow_diagnostics` session，不写 `session_info.json`，不保存 confirmed snapshot、gallery、crop、CSV、events 或 session_stop。
+- 运行中关闭日志会立即停止 active session，并禁用“目标离开 / 返回”事件按钮。
+- 日志开启并 Confirm 激活 session 后，事件按钮才可用；跟随推理、状态机和 debug 文本不受日志开关影响。
+
+### 16.5 构建验证
+
+构建命令：
+
+```powershell
+$env:JAVA_HOME='C:\Users\ysyys\.jdks\jbr-17.0.14'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat :robot:assembleDebug
+```
+
+结果：构建通过，生成 debug APK。构建日志仍包含既有 TensorFlow Lite namespace、Kotlin/Javac target 和 deprecated API warning，未阻塞构建。
+
+### 16.6 下一轮手机验收重点
+
+1. 日志开关关闭时，Start、Confirm、运行、Retake、Cancel 都不应新增 `cartfollow_diagnostics/cart_diag_*` 目录。
+2. 日志开关开启后，Confirm 才激活 session，并正常生成 `frame_log.csv / identity_log.csv / events.csv / session_info.json / gallery / crops`。
+3. 目标离开后原目标返回：期望恢复到新 track 后自动 relock，后续 `trackId == lockedTrackId`。
+4. 蹲下、弯腰或局部遮挡：期望检测器丢框后可恢复，恢复成功后 relock 到新 track。
+5. 目标离开后干扰者进入：期望干扰者无空间支持时不进入 suspected，不恢复 FOLLOW。
+6. 目标在场时干扰者穿越：期望 `candidateSwitchCount` 明显下降，非 locked FOLLOW 行数减少或归零。
+7. PC compare 继续检查 `candidate_switch_penalty / belief_high_bbox_failed / recovered_rate / hard_stop_count / gallery_candidate_landscape_rate`，合格后再讨论极低速真实底盘联调。
