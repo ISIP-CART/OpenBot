@@ -29,6 +29,8 @@ public class BluetoothManager {
     void onBleSerialReady();
 
     void onBleDisconnected();
+
+    void onBleCriticalWriteFailure();
   }
 
   private static final String SERVICE_UUID = "61653dc3-4021-4d1e-ba83-8b4eec61d613";
@@ -48,12 +50,23 @@ public class BluetoothManager {
   public String readValue;
   private final LocalBroadcastManager localBroadcastManager;
   private final ConnectionListener connectionListener;
+  private final BleSerialWriteQueue writeQueue;
+  private long motionGeneration;
   private boolean notifyEnabled;
   UUID[] uuidArray = new UUID[] {UUID.fromString(SERVICE_UUID)};
 
   public BluetoothManager(Context context, ConnectionListener connectionListener) {
     this.context = context;
     this.connectionListener = connectionListener;
+    writeQueue =
+        new BleSerialWriteQueue(
+            this::writeGatt,
+            payload -> {
+              Logger.e("critical BLE write failed twice: " + payload.trim());
+              if (this.connectionListener != null) {
+                this.connectionListener.onBleCriticalWriteFailure();
+              }
+            });
     initBleManager();
     localBroadcastManager = LocalBroadcastManager.getInstance(this.context);
   }
@@ -153,6 +166,7 @@ public class BluetoothManager {
         @Override
         public void onDisconnected(String info, int status, BleDevice device) {
           bleDevice = null;
+          writeQueue.clear();
           clearSerialCharacteristics();
           if (connectionListener != null) connectionListener.onBleDisconnected();
           notifyAdapter();
@@ -195,16 +209,44 @@ public class BluetoothManager {
     }
   }
 
-  public void write(String msg) {
-    if (isSerialReady()) {
-      BleManager.getInstance()
-          .write(
-              bleDevice,
-              writeServiceInfo.uuid,
-              writeCharacteristic.uuid,
-              msg.getBytes(UTF_8),
-              writeCallback);
+  public synchronized void write(String msg) {
+    if (!isSerialReady() || msg == null) return;
+    BleSerialWriteQueue.Type type = classifyWrite(msg);
+    long generation = type == BleSerialWriteQueue.Type.MOTION ? ++motionGeneration : 0L;
+    writeQueue.enqueue(type, msg, generation);
+  }
+
+  public synchronized void writeControlTransition(String stop, String motion, long generation) {
+    if (!isSerialReady()) return;
+    motionGeneration = Math.max(motionGeneration, generation);
+    writeQueue.enqueueTransition(stop, motion, generation);
+  }
+
+  public String getWriteStatus() {
+    return writeQueue.getStatus();
+  }
+
+  private void writeGatt(String msg) {
+    if (!isSerialReady()) {
+      writeQueue.onWriteComplete(false);
+      return;
     }
+    BleManager.getInstance()
+        .write(
+            bleDevice,
+            writeServiceInfo.uuid,
+            writeCharacteristic.uuid,
+            msg.getBytes(UTF_8),
+            writeCallback);
+  }
+
+  private static BleSerialWriteQueue.Type classifyWrite(String msg) {
+    String line = msg.trim();
+    if (line.startsWith("!S,")) return BleSerialWriteQueue.Type.EMERGENCY;
+    if (line.equals("c0,0")) return BleSerialWriteQueue.Type.STOP;
+    if (line.startsWith("c")) return BleSerialWriteQueue.Type.MOTION;
+    if (line.startsWith("h")) return BleSerialWriteQueue.Type.HEARTBEAT;
+    return BleSerialWriteQueue.Type.QUERY;
   }
 
   public BleMtuCallback mtuCallback =
@@ -226,11 +268,13 @@ public class BluetoothManager {
         public void onWriteSuccess(byte[] data, BleDevice device) {
           String value = new String(data, StandardCharsets.UTF_8);
           Logger.i("write success:" + value);
+          writeQueue.onWriteComplete(true);
         }
 
         @Override
         public void onFailure(int failCode, String info, BleDevice device) {
           Logger.e("write fail:" + info + " " + failCode);
+          writeQueue.onWriteComplete(false);
         }
       };
 

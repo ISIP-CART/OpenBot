@@ -287,6 +287,22 @@ public class Vehicle {
     sendControl();
   }
 
+  /** Atomically queues a stop followed by a replacement BLE drive target. */
+  public void setControlReplacing(Control control, long generation) {
+    this.control = control;
+    int left = (int) getLeftSpeed();
+    int right = (int) getRightSpeed();
+    String motion = String.format(Locale.US, "c%d,%d\n", left, right);
+    if (getConnectionType().equals("Bluetooth")
+        && bluetoothManager != null
+        && bluetoothManager.isBleConnected()) {
+      bluetoothManager.writeControlTransition("c0,0\n", motion, generation);
+    } else {
+      sendStringToDevice("c0,0\n");
+      sendStringToDevice(motion);
+    }
+  }
+
   public void setControl(float left, float right) {
     this.control = new Control(left, right);
     sendControl();
@@ -535,6 +551,15 @@ public class Vehicle {
                 setReady(false);
                 stopHeartbeat();
               }
+
+              @Override
+              public void onBleCriticalWriteFailure() {
+                control = new Control(0, 0);
+                bleSerialReady = false;
+                cartFirmwareReady = false;
+                setReady(false);
+                stopHeartbeat();
+              }
             });
   }
 
@@ -548,6 +573,10 @@ public class Vehicle {
 
   public boolean isBleSerialReady() {
     return bleSerialReady && bluetoothManager != null && bluetoothManager.isSerialReady();
+  }
+
+  public String getBleWriteStatus() {
+    return bluetoothManager == null ? "unavailable" : bluetoothManager.getWriteStatus();
   }
 
   public boolean isCartFirmwareReady() {

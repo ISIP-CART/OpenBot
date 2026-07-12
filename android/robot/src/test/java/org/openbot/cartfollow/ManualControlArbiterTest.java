@@ -12,7 +12,7 @@ public class ManualControlArbiterTest {
     ManualControlArbiter arbiter = new ManualControlArbiter();
 
     ManualControlArbiter.PressResult result =
-        arbiter.press(ManualControlArbiter.Control.FORWARD);
+        arbiter.press(ManualControlArbiter.Control.FORWARD, 0);
 
     assertFalse(result.replacedActiveControl);
     assertEquals(ManualControlArbiter.Control.FORWARD, arbiter.getActiveControl());
@@ -22,9 +22,9 @@ public class ManualControlArbiterTest {
   @Test
   public void differentPressReplacesThePreviousControl() {
     ManualControlArbiter arbiter = new ManualControlArbiter();
-    arbiter.press(ManualControlArbiter.Control.FORWARD);
+    arbiter.press(ManualControlArbiter.Control.FORWARD, 0);
 
-    ManualControlArbiter.PressResult result = arbiter.press(ManualControlArbiter.Control.LEFT);
+    ManualControlArbiter.PressResult result = arbiter.press(ManualControlArbiter.Control.LEFT, 1);
 
     assertTrue(result.replacedActiveControl);
     assertEquals(ManualControlArbiter.Control.LEFT, arbiter.getActiveControl());
@@ -34,29 +34,40 @@ public class ManualControlArbiterTest {
   @Test
   public void delayedReleaseFromReplacedControlIsIgnored() {
     ManualControlArbiter arbiter = new ManualControlArbiter();
-    arbiter.press(ManualControlArbiter.Control.FORWARD);
-    arbiter.press(ManualControlArbiter.Control.LEFT);
+    arbiter.press(ManualControlArbiter.Control.FORWARD, 0);
+    arbiter.press(ManualControlArbiter.Control.LEFT, 1);
 
-    assertFalse(arbiter.release(ManualControlArbiter.Control.FORWARD));
+    assertFalse(arbiter.release(ManualControlArbiter.Control.FORWARD, 0));
     assertEquals(ManualControlArbiter.Control.LEFT, arbiter.getActiveControl());
   }
 
   @Test
   public void activeReleaseStopsManualOwnership() {
     ManualControlArbiter arbiter = new ManualControlArbiter();
-    arbiter.press(ManualControlArbiter.Control.RIGHT);
+    arbiter.press(ManualControlArbiter.Control.RIGHT, 3);
 
-    assertTrue(arbiter.release(ManualControlArbiter.Control.RIGHT));
+    assertTrue(arbiter.release(ManualControlArbiter.Control.RIGHT, 3));
     assertEquals(null, arbiter.getActiveControl());
   }
 
   @Test
   public void clearInvalidatesAnyLaterRelease() {
     ManualControlArbiter arbiter = new ManualControlArbiter();
-    arbiter.press(ManualControlArbiter.Control.BACKWARD);
+    arbiter.press(ManualControlArbiter.Control.BACKWARD, 2);
 
     assertTrue(arbiter.clear());
-    assertFalse(arbiter.release(ManualControlArbiter.Control.BACKWARD));
+    assertFalse(arbiter.release(ManualControlArbiter.Control.BACKWARD, 2));
     assertEquals(null, arbiter.getActiveControl());
+  }
+
+  @Test
+  public void releaseFromOldPointerOnSameButtonIsIgnored() {
+    ManualControlArbiter arbiter = new ManualControlArbiter();
+    arbiter.press(ManualControlArbiter.Control.FORWARD, 0);
+    arbiter.press(ManualControlArbiter.Control.FORWARD, 1);
+
+    assertFalse(arbiter.release(ManualControlArbiter.Control.FORWARD, 0));
+    assertEquals(1, arbiter.getActivePointerId());
+    assertEquals(ManualControlArbiter.Control.FORWARD, arbiter.getActiveControl());
   }
 }
