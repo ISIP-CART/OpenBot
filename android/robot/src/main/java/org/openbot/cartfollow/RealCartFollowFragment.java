@@ -16,11 +16,13 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   private static final long AUTO_UNLOCK_HOLD_MS = 2000L;
 
   private final RealCartSafetyController safetyController = new RealCartSafetyController();
+  private final ManualControlArbiter manualControlArbiter = new ManualControlArbiter();
   private final Handler mainHandler = new Handler(Looper.getMainLooper());
   private volatile RealCartSafetyController.Output latestOutput =
       RealCartSafetyController.stop("idle");
   private boolean schedulerRunning;
   private long lastHandshakeRequestMs;
+  private View activeManualButton;
 
   private final Runnable commandScheduler =
       new Runnable() {
@@ -62,18 +64,22 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
 
     installDeadMan(
         binding.driveForward,
+        ManualControlArbiter.Control.FORWARD,
         RealCartSafetyController.MANUAL_FORWARD,
         RealCartSafetyController.MANUAL_FORWARD);
     installDeadMan(
         binding.driveBackward,
+        ManualControlArbiter.Control.BACKWARD,
         -RealCartSafetyController.MANUAL_REVERSE,
         -RealCartSafetyController.MANUAL_REVERSE);
     installDeadMan(
         binding.driveLeft,
+        ManualControlArbiter.Control.LEFT,
         -RealCartSafetyController.MANUAL_TURN,
         RealCartSafetyController.MANUAL_TURN);
     installDeadMan(
         binding.driveRight,
+        ManualControlArbiter.Control.RIGHT,
         RealCartSafetyController.MANUAL_TURN,
         -RealCartSafetyController.MANUAL_TURN);
 
@@ -83,7 +89,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
     binding.emergencyStop.setOnClickListener(
         v -> {
           safetyController.latchEmergency();
-          latestOutput = RealCartSafetyController.stop("emergency_stop");
+          invalidateManualControl("emergency_stop", true);
           vehicle.emergencyStop();
           binding.startSwitch.setChecked(false);
           binding.startSwitch.setEnabled(false);
@@ -104,9 +110,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   @Override
   protected void onCartFollowPause() {
     safetyController.setForeground(false);
-    latestOutput = RealCartSafetyController.stop("paused");
-    sendOutput(latestOutput);
-    vehicle.stopBot();
+    invalidateManualControl("paused", true);
     vehicle.stopHeartbeat();
     schedulerRunning = false;
     mainHandler.removeCallbacks(commandScheduler);
@@ -145,8 +149,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   }
 
   private void setMode(RealCartSafetyController.Mode mode) {
-    latestOutput = RealCartSafetyController.stop("mode_change");
-    sendOutput(latestOutput);
+    invalidateManualControl("mode_change", true);
     safetyController.setMode(mode);
     stateMachine.cancel();
     binding.startSwitch.setChecked(false);
@@ -158,20 +161,43 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
     refreshRealUi();
   }
 
-  private void installDeadMan(View button, int left, int right) {
+  private void installDeadMan(
+      View button, ManualControlArbiter.Control control, int left, int right) {
     button.setOnTouchListener(
         (view, event) -> {
           switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-              latestOutput = safetyController.manual(left, right);
+              RealCartSafetyController.Output nextOutput = safetyController.manual(left, right);
+              if (nextOutput.isStop()) {
+                invalidateManualControl("manual_blocked", true);
+                view.setPressed(false);
+                return true;
+              }
+
+              ManualControlArbiter.PressResult pressResult = manualControlArbiter.press(control);
+              if (pressResult.replacedActiveControl) {
+                // c0,0 bypasses the firmware ramp. Send it before the new target so the AT8236
+                // starts the replacement direction from a known zero output.
+                latestOutput = RealCartSafetyController.stop("manual_replace");
+                sendOutput(latestOutput);
+                if (activeManualButton != null && activeManualButton != view) {
+                  activeManualButton.setPressed(false);
+                }
+              }
+              activeManualButton = view;
+              latestOutput = nextOutput;
+              sendOutput(latestOutput);
               view.setPressed(true);
               return true;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
             case MotionEvent.ACTION_OUTSIDE:
-              latestOutput = RealCartSafetyController.stop("manual_release");
-              sendOutput(latestOutput);
               view.setPressed(false);
+              if (manualControlArbiter.release(control)) {
+                activeManualButton = null;
+                latestOutput = RealCartSafetyController.stop("manual_release");
+                sendOutput(latestOutput);
+              }
               return true;
             default:
               return true;
@@ -205,9 +231,17 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
     boolean serialReady = vehicle != null && vehicle.isBleSerialReady();
     boolean firmwareReady = vehicle != null && vehicle.isCartFirmwareReady();
     safetyController.setConnection(serialReady, firmwareReady);
-    if (!firmwareReady && latestOutput != null && !latestOutput.isStop()) {
-      latestOutput = RealCartSafetyController.stop("ble_not_ready");
+    if (!firmwareReady) {
+      invalidateManualControl("ble_not_ready", false);
     }
+  }
+
+  private void invalidateManualControl(String reason, boolean sendStop) {
+    manualControlArbiter.clear();
+    if (activeManualButton != null) activeManualButton.setPressed(false);
+    activeManualButton = null;
+    latestOutput = RealCartSafetyController.stop(reason);
+    if (sendStop) sendOutput(latestOutput);
   }
 
   private void startScheduler() {
