@@ -1019,3 +1019,66 @@ $env:Path="$env:JAVA_HOME\bin;$env:Path"
 5. 目标离开后干扰者进入：期望干扰者无空间支持时不进入 suspected，不恢复 FOLLOW。
 6. 目标在场时干扰者穿越：期望 `candidateSwitchCount` 明显下降，非 locked FOLLOW 行数减少或归零。
 7. PC compare 继续检查 `candidate_switch_penalty / belief_high_bbox_failed / recovered_rate / hard_stop_count / gallery_candidate_landscape_rate`，合格后再讨论极低速真实底盘联调。
+
+---
+
+## 17. BLE 真实小车跟随模块首版（2026-07-12）
+
+### 17.1 实现定位
+
+新增主菜单入口 `Real Cart Follow`，将 Human Cart Simulator 的相机、检测、ReID、
+track/belief、状态机、ActionArbitrator 和诊断能力抽取到
+`BaseCartFollowFragment`。Simulator 继续只显示人肉模拟指令；真实模块才允许向
+`Vehicle` 输出控制。
+
+### 17.2 BLE 会话与安全边界
+
+- 严格匹配 OpenBot BLE Service、RX 和 TX UUID，Notify 订阅完成后才认为串口可用。
+- BLE Ready 后启动幂等 `h750` 心跳并发送 `f`，只有收到 `fCART_AT8236` 和 `r`
+  后才允许运动。
+- 页面暂停、模式切换、BLE 断开、推理超过 400 ms 无更新时立即发送零控制。
+- 手机急停发送 `!S,<seq>`，ESP32 锁存急停后必须重启才能恢复。
+- 下位机还独立检查 500 ms 非零运动命令保鲜，心跳不能掩盖控制线程卡死。
+
+### 17.3 手动与自动模式
+
+手动模式为 dead-man 控制，每 100 ms 重发当前命令：
+
+```text
+前进 28
+后退 24
+原地转向 20
+松手 / CANCEL / 退后台 -> 0,0
+```
+
+自动模式每次进入页面都需要长按 2 秒解锁，最大协议输出为 32，
+`FOLLOW_CAUTION` 进一步降速。`LOCAL_SEARCH` 固定为低速原地旋转，连续运动最多
+2 秒，超时后停车并撤销自动解锁。
+
+近场传感器和物理急停尚未接入，因此自动模式只用于空旷场地、有人准备物理断电的
+实验，不视为正式避障能力。
+
+### 17.4 自动化验证
+
+使用 JDK 17 完成：
+
+```powershell
+.\gradlew.bat :robot:testDebugUnitTest --no-daemon
+.\gradlew.bat :robot:assembleDebug --no-daemon
+```
+
+结果：
+
+```text
+RealCartSafetyControllerTest  6/6
+全部单元测试                 11/11
+Debug APK                    android/robot/build/outputs/apk/debug/robot-debug.apk
+```
+
+### 17.5 真机验收顺序
+
+1. 不接电机验证 BLE 扫描、`f/r/h`、急停和重启解除。
+2. 车轮悬空验证四方向、松手停车、断连停车和双超时停车。
+3. 空载落地只开放手动模式。
+4. 手动全部通过后，才在空旷场地长按解锁自动实验。
+5. 传感器和物理急停到位前，不进入货架、拥挤或无人看护场景。

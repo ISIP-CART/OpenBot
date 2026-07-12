@@ -108,7 +108,7 @@
         android:orientation="horizontal"
         android:padding="12dp"
         android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@+id/bottom_panel"
+        app:layout_constraintBottom_toTopOf="@+id/real_control_panel"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">
 
@@ -161,6 +161,126 @@
                     android:text="取消" />
             </LinearLayout>
         </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/real_control_panel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="#E6000000"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="8dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/bottom_panel"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <TextView
+            android:id="@+id/real_connection_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="BLE 未连接"
+            android:textColor="@android:color/white"
+            android:textSize="14sp" />
+
+        <com.google.android.material.button.MaterialButtonToggleGroup
+            android:id="@+id/real_mode_group"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/real_mode_manual"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:text="手动" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/real_mode_auto"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:text="自动实验" />
+        </com.google.android.material.button.MaterialButtonToggleGroup>
+
+        <LinearLayout
+            android:id="@+id/manual_drive_controls"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/drive_left"
+                android:layout_width="56dp"
+                android:layout_height="48dp"
+                android:text="↶"
+                android:textSize="22sp" />
+
+            <Button
+                android:id="@+id/drive_forward"
+                android:layout_width="56dp"
+                android:layout_height="48dp"
+                android:text="↑"
+                android:textSize="22sp" />
+
+            <Button
+                android:id="@+id/drive_backward"
+                android:layout_width="56dp"
+                android:layout_height="48dp"
+                android:text="↓"
+                android:textSize="22sp" />
+
+            <Button
+                android:id="@+id/drive_right"
+                android:layout_width="56dp"
+                android:layout_height="48dp"
+                android:text="↷"
+                android:textSize="22sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/connect_ble"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:text="连接 BLE" />
+
+            <Button
+                android:id="@+id/unlock_auto"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:layout_marginStart="8dp"
+                android:text="长按解锁自动"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/emergency_stop"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:layout_marginStart="8dp"
+                android:backgroundTint="#D32F2F"
+                android:text="急停"
+                android:textColor="@android:color/white" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/real_safety_notice"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="近场传感器未接入，仅限空旷实验"
+            android:textColor="#FFFF8A80"
+            android:textSize="12sp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <LinearLayout

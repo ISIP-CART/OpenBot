@@ -25,6 +25,15 @@ import org.openbot.main.ScanDeviceAdapter;
 import org.openbot.utils.Constants;
 
 public class BluetoothManager {
+  public interface ConnectionListener {
+    void onBleSerialReady();
+
+    void onBleDisconnected();
+  }
+
+  private static final String SERVICE_UUID = "61653dc3-4021-4d1e-ba83-8b4eec61d613";
+  private static final String RX_UUID = "06386c14-86ea-4d71-811c-48f97c58f8c9";
+  private static final String TX_UUID = "9bf1103b-834c-47cf-b149-c9e4bcf778a7";
   private BleManager manager;
   private CharacteristicInfo notifyCharacteristic;
   private CharacteristicInfo writeCharacteristic;
@@ -38,11 +47,13 @@ public class BluetoothManager {
   private int indexValue;
   public String readValue;
   private final LocalBroadcastManager localBroadcastManager;
-  private String serviceUUID = "61653dc3-4021-4d1e-ba83-8b4eec61d613";
-  UUID[] uuidArray = new UUID[] {UUID.fromString(serviceUUID)};
+  private final ConnectionListener connectionListener;
+  private boolean notifyEnabled;
+  UUID[] uuidArray = new UUID[] {UUID.fromString(SERVICE_UUID)};
 
-  public BluetoothManager(Context context) {
+  public BluetoothManager(Context context, ConnectionListener connectionListener) {
     this.context = context;
+    this.connectionListener = connectionListener;
     initBleManager();
     localBroadcastManager = LocalBroadcastManager.getInstance(this.context);
   }
@@ -81,7 +92,7 @@ public class BluetoothManager {
               }
             }
             deviceList.add(device);
-            adapter.notifyDataSetChanged();
+            notifyAdapter();
           }
 
           @Override
@@ -97,7 +108,7 @@ public class BluetoothManager {
 
           @Override
           public void onFinish() {
-            adapter.notifyDataSetChanged();
+            notifyAdapter();
           }
         });
   }
@@ -126,7 +137,7 @@ public class BluetoothManager {
           bleDevice = device;
           deviceList.remove(indexValue);
           deviceList.add(indexValue, device);
-          adapter.notifyDataSetChanged();
+          notifyAdapter();
         }
 
         @Override
@@ -134,7 +145,7 @@ public class BluetoothManager {
           bleDevice = device;
           deviceList.remove(indexValue);
           deviceList.add(indexValue, device);
-          adapter.notifyDataSetChanged();
+          notifyAdapter();
           addDeviceInfoDataAndUpdate();
           Logger.i("Successfully connected: " + " " + device);
         }
@@ -142,7 +153,9 @@ public class BluetoothManager {
         @Override
         public void onDisconnected(String info, int status, BleDevice device) {
           bleDevice = null;
-          adapter.notifyDataSetChanged();
+          clearSerialCharacteristics();
+          if (connectionListener != null) connectionListener.onBleDisconnected();
+          notifyAdapter();
           Logger.i("disconnected!");
         }
 
@@ -153,7 +166,7 @@ public class BluetoothManager {
           deviceList.remove(indexValue);
           deviceList.add(indexValue, device);
           Toast.makeText(context, "Connection fail: " + info, Toast.LENGTH_LONG).show();
-          adapter.notifyDataSetChanged();
+          notifyAdapter();
         }
       };
 
@@ -165,15 +178,16 @@ public class BluetoothManager {
       return;
     }
     for (Map.Entry<ServiceInfo, List<CharacteristicInfo>> e : deviceInfo.entrySet()) {
+      if (!SERVICE_UUID.equalsIgnoreCase(e.getKey().uuid)) continue;
       for (CharacteristicInfo characteristicInfo : e.getValue()) {
-        if (characteristicInfo.notify) {
+        if (TX_UUID.equalsIgnoreCase(characteristicInfo.uuid) && characteristicInfo.notify) {
           notifyCharacteristic = characteristicInfo;
           notifyServiceInfo = e.getKey();
           if (isBleConnected())
             // Set the MTU size to 64 bytes
             BleManager.getInstance().setMtu(bleDevice, 64, mtuCallback);
         }
-        if (characteristicInfo.writable) {
+        if (RX_UUID.equalsIgnoreCase(characteristicInfo.uuid) && characteristicInfo.writable) {
           writeServiceInfo = e.getKey();
           writeCharacteristic = characteristicInfo;
         }
@@ -182,7 +196,7 @@ public class BluetoothManager {
   }
 
   public void write(String msg) {
-    if (isBleConnected()) {
+    if (isSerialReady()) {
       BleManager.getInstance()
           .write(
               bleDevice,
@@ -233,6 +247,10 @@ public class BluetoothManager {
           if (!notifySuccessUuids.contains(notifySuccessUuid)) {
             notifySuccessUuids.add(notifySuccessUuid);
           }
+          if (TX_UUID.equalsIgnoreCase(notifySuccessUuid) && connectionListener != null) {
+            notifyEnabled = true;
+            connectionListener.onBleSerialReady();
+          }
         }
 
         @Override
@@ -245,12 +263,34 @@ public class BluetoothManager {
     return bleDevice != null && bleDevice.connected;
   }
 
+  public boolean isSerialReady() {
+    return isBleConnected()
+        && writeServiceInfo != null
+        && writeCharacteristic != null
+        && notifyServiceInfo != null
+        && notifyCharacteristic != null
+        && notifyEnabled;
+  }
+
+  private void clearSerialCharacteristics() {
+    writeServiceInfo = null;
+    writeCharacteristic = null;
+    notifyServiceInfo = null;
+    notifyCharacteristic = null;
+    notifySuccessUuids.clear();
+    notifyEnabled = false;
+  }
+
+  private void notifyAdapter() {
+    if (adapter != null) adapter.notifyDataSetChanged();
+  }
+
   private void onSerialDataReceived(String data) {
     // Add whatever you want here
     Logger.i("Serial data received from BLE: " + data);
     localBroadcastManager.sendBroadcast(
         new Intent(Constants.DEVICE_ACTION_DATA_RECEIVED)
-            .putExtra("from", "usb")
+            .putExtra("from", "ble")
             .putExtra("data", data));
   }
 }
