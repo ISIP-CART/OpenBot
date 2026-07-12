@@ -49,6 +49,9 @@ public class Vehicle {
   private boolean hasLedsBack = false;
   private boolean hasLedsStatus = false;
   private boolean isReady = false;
+  private boolean bleSerialReady = false;
+  private boolean cartFirmwareReady = false;
+  private long emergencySequence = 0L;
   private BluetoothManager bluetoothManager;
   SharedPreferences sharedPreferences;
   public String connectionType;
@@ -171,6 +174,7 @@ public class Vehicle {
 
   public void processVehicleConfig(String message) {
     setVehicleType(message.split(":")[0]);
+    cartFirmwareReady = "CART_AT8236".equals(getVehicleType());
 
     if (message.contains(":v:")) {
       setHasVoltageDivider(true);
@@ -454,6 +458,7 @@ public class Vehicle {
   }
 
   public void startHeartbeat() {
+    if (heartbeatTimer != null) return;
     heartbeatTimer = new Timer();
     HeartBeatTask heartBeatTask = new HeartBeatTask();
     heartbeatTimer.schedule(heartBeatTask, 250, 250); // 250ms delay and 250ms intervals
@@ -508,7 +513,29 @@ public class Vehicle {
   }
 
   public void initBle() {
-    bluetoothManager = new BluetoothManager(context);
+    if (bluetoothManager != null) return;
+    bluetoothManager =
+        new BluetoothManager(
+            context,
+            new BluetoothManager.ConnectionListener() {
+              @Override
+              public void onBleSerialReady() {
+                bleSerialReady = true;
+                setReady(false);
+                cartFirmwareReady = false;
+                startHeartbeat();
+                requestVehicleConfig();
+              }
+
+              @Override
+              public void onBleDisconnected() {
+                control = new Control(0, 0);
+                bleSerialReady = false;
+                cartFirmwareReady = false;
+                setReady(false);
+                stopHeartbeat();
+              }
+            });
   }
 
   private void sendStringToBle(String message) {
@@ -517,6 +544,25 @@ public class Vehicle {
 
   public boolean bleConnected() {
     return bluetoothManager.isBleConnected();
+  }
+
+  public boolean isBleSerialReady() {
+    return bleSerialReady && bluetoothManager != null && bluetoothManager.isSerialReady();
+  }
+
+  public boolean isCartFirmwareReady() {
+    return isBleSerialReady() && cartFirmwareReady && isReady();
+  }
+
+  public void useBluetoothConnection() {
+    connectionType = "Bluetooth";
+    setConnectionPreferences("connection_type", connectionType);
+  }
+
+  public synchronized void emergencyStop() {
+    stopBot();
+    emergencySequence++;
+    sendStringToDevice(String.format(Locale.US, "!S,%d\n", emergencySequence));
   }
 
   private void setConnectionPreferences(String name, String value) {

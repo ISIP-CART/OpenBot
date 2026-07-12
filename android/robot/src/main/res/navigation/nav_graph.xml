@@ -29,6 +29,9 @@
             android:id="@+id/action_mainFragment_to_cartSimFragment"
             app:destination="@id/cartSimFragment" />
         <action
+            android:id="@+id/action_mainFragment_to_realCartFollowFragment"
+            app:destination="@id/realCartFollowFragment" />
+        <action
             android:id="@+id/action_mainFragment_to_personCropCollectorFragment"
             app:destination="@id/personCropCollectorFragment" />
         <action
@@ -124,6 +127,12 @@
         android:id="@+id/cartSimFragment"
         android:name="org.openbot.cartfollow.HumanCartSimulatorFragment"
         android:label="fragment_human_cart_simulator"
+        tools:layout="@layout/fragment_human_cart_simulator" />
+
+    <fragment
+        android:id="@+id/realCartFollowFragment"
+        android:name="org.openbot.cartfollow.RealCartFollowFragment"
+        android:label="真实小车跟随"
         tools:layout="@layout/fragment_human_cart_simulator" />
 
     <fragment
