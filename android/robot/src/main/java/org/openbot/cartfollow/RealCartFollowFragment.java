@@ -6,6 +6,7 @@ import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 import androidx.navigation.Navigation;
+import org.openbot.BuildConfig;
 import org.openbot.R;
 import org.openbot.vehicle.Control;
 
@@ -39,6 +40,10 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
           }
           RealCartSafetyController.Output watchdog = safetyController.watchdog(now);
           if (watchdog != null) latestOutput = watchdog;
+          if (safetyController.getMode() == RealCartSafetyController.Mode.MANUAL
+              && manualControlArbiter.getActiveControl() == null) {
+            latestOutput = RealCartSafetyController.stop("manual_idle");
+          }
           sendOutput(latestOutput);
           refreshRealUi();
           mainHandler.postDelayed(this, COMMAND_REPEAT_MS);
@@ -86,6 +91,17 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
     binding.connectBle.setOnClickListener(
         v -> Navigation.findNavController(requireView()).navigate(R.id.open_bluetooth_fragment));
     installAutoUnlock();
+    binding
+        .getRoot()
+        .getViewTreeObserver()
+        .addOnWindowFocusChangeListener(
+            hasFocus -> {
+              if (!hasFocus
+                  && binding != null
+                  && safetyController.getMode() == RealCartSafetyController.Mode.MANUAL) {
+                invalidateManualControl("window_focus_lost", true);
+              }
+            });
     binding.emergencyStop.setOnClickListener(
         v -> {
           safetyController.latchEmergency();
@@ -167,6 +183,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
         (view, event) -> {
           switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+              int downPointerId = event.getPointerId(event.getActionIndex());
               RealCartSafetyController.Output nextOutput = safetyController.manual(left, right);
               if (nextOutput.isStop()) {
                 invalidateManualControl("manual_blocked", true);
@@ -174,29 +192,36 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
                 return true;
               }
 
-              ManualControlArbiter.PressResult pressResult = manualControlArbiter.press(control);
+              ManualControlArbiter.PressResult pressResult =
+                  manualControlArbiter.press(control, downPointerId);
               if (pressResult.replacedActiveControl) {
-                // c0,0 bypasses the firmware ramp. Send it before the new target so the AT8236
-                // starts the replacement direction from a known zero output.
-                latestOutput = RealCartSafetyController.stop("manual_replace");
-                sendOutput(latestOutput);
                 if (activeManualButton != null && activeManualButton != view) {
                   activeManualButton.setPressed(false);
                 }
+                latestOutput = nextOutput;
+                sendReplacementOutput(nextOutput, pressResult.generation);
+              } else {
+                latestOutput = nextOutput;
+                sendOutput(latestOutput);
               }
               activeManualButton = view;
-              latestOutput = nextOutput;
-              sendOutput(latestOutput);
               view.setPressed(true);
               return true;
             case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL:
+            case MotionEvent.ACTION_POINTER_UP:
             case MotionEvent.ACTION_OUTSIDE:
+              int upPointerId = event.getPointerId(event.getActionIndex());
               view.setPressed(false);
-              if (manualControlArbiter.release(control)) {
+              if (manualControlArbiter.release(control, upPointerId)) {
                 activeManualButton = null;
                 latestOutput = RealCartSafetyController.stop("manual_release");
                 sendOutput(latestOutput);
+              }
+              return true;
+            case MotionEvent.ACTION_CANCEL:
+              view.setPressed(false);
+              if (manualControlArbiter.getActiveControl() == control) {
+                invalidateManualControl("manual_cancel", true);
               }
               return true;
             default:
@@ -257,6 +282,14 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
         new Control(output.left / (float) multiplier, output.right / (float) multiplier));
   }
 
+  private void sendReplacementOutput(RealCartSafetyController.Output output, long generation) {
+    if (vehicle == null || output == null) return;
+    int multiplier = Math.max(1, vehicle.getSpeedMultiplier());
+    vehicle.setControlReplacing(
+        new Control(output.left / (float) multiplier, output.right / (float) multiplier),
+        generation);
+  }
+
   private void refreshRealUi() {
     if (binding == null) return;
     requireActivity()
@@ -269,7 +302,17 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
                       : vehicle.isBleSerialReady() ? "BLE 已连接 · 等待固件握手" : "BLE 未连接";
               String output =
                   latestOutput == null ? "0,0" : latestOutput.left + "," + latestOutput.right;
-              binding.realConnectionStatus.setText(connection + " · 输出 " + output);
+              ManualControlArbiter.Control active = manualControlArbiter.getActiveControl();
+              binding.realConnectionStatus.setText(
+                  connection
+                      + " | output="
+                      + output
+                      + " | direction="
+                      + (active == null ? "STOP" : active.name())
+                      + " | ble="
+                      + vehicle.getBleWriteStatus()
+                      + " | build="
+                      + BuildConfig.VERSION_NAME);
               boolean emergency = safetyController.isEmergencyLatched();
               binding.emergencyStop.setEnabled(!emergency);
               binding.unlockAuto.setEnabled(!emergency && vehicle.isCartFirmwareReady());

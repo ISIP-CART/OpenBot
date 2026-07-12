@@ -9,11 +9,11 @@ public final class RealCartSafetyController {
     AUTO
   }
 
-  public static final int MANUAL_FORWARD = 28;
-  public static final int MANUAL_REVERSE = 24;
-  public static final int MANUAL_TURN = 20;
-  public static final int AUTO_MAX = 32;
-  public static final int SEARCH_SPEED = 18;
+  public static final int MANUAL_FORWARD = 14;
+  public static final int MANUAL_REVERSE = 12;
+  public static final int MANUAL_TURN = 5;
+  public static final int AUTO_MAX = 14;
+  public static final int SEARCH_SPEED = 5;
   public static final long INFERENCE_TIMEOUT_MS = 400L;
   public static final long SEARCH_LIMIT_MS = 2000L;
 

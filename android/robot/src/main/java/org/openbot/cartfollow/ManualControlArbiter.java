@@ -26,20 +26,24 @@ final class ManualControlArbiter {
   }
 
   private Control activeControl;
+  private int activePointerId = -1;
   private long generation;
 
-  synchronized PressResult press(Control control) {
+  synchronized PressResult press(Control control, int pointerId) {
     if (control == null) throw new IllegalArgumentException("control must not be null");
+    if (pointerId < 0) throw new IllegalArgumentException("pointerId must be non-negative");
 
-    boolean replaced = activeControl != null && activeControl != control;
-    if (activeControl != control) generation++;
+    boolean replaced = activeControl != null && (activeControl != control || activePointerId != pointerId);
+    if (activeControl != control || activePointerId != pointerId) generation++;
     activeControl = control;
+    activePointerId = pointerId;
     return new PressResult(replaced, generation);
   }
 
-  synchronized boolean release(Control control) {
-    if (control == null || activeControl != control) return false;
+  synchronized boolean release(Control control, int pointerId) {
+    if (control == null || activeControl != control || activePointerId != pointerId) return false;
     activeControl = null;
+    activePointerId = -1;
     generation++;
     return true;
   }
@@ -47,12 +51,17 @@ final class ManualControlArbiter {
   synchronized boolean clear() {
     if (activeControl == null) return false;
     activeControl = null;
+    activePointerId = -1;
     generation++;
     return true;
   }
 
   synchronized Control getActiveControl() {
     return activeControl;
+  }
+
+  synchronized int getActivePointerId() {
+    return activePointerId;
   }
 
   synchronized long getGeneration() {

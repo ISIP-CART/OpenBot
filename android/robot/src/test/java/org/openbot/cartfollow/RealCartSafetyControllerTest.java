@@ -13,13 +13,30 @@ public class RealCartSafetyControllerTest {
   @Test
   public void manualRequiresForegroundConnectionAndHandshake() {
     RealCartSafetyController controller = new RealCartSafetyController();
-    assertTrue(controller.manual(28, 28).isStop());
+    assertTrue(
+        controller
+            .manual(
+                RealCartSafetyController.MANUAL_FORWARD,
+                RealCartSafetyController.MANUAL_FORWARD)
+            .isStop());
 
     controller.setForeground(true);
     controller.setConnection(true, true);
-    RealCartSafetyController.Output output = controller.manual(28, 28);
-    assertEquals(28, output.left);
-    assertEquals(28, output.right);
+    RealCartSafetyController.Output output =
+        controller.manual(
+            RealCartSafetyController.MANUAL_FORWARD,
+            RealCartSafetyController.MANUAL_FORWARD);
+    assertEquals(14, output.left);
+    assertEquals(14, output.right);
+  }
+
+  @Test
+  public void realCartSpeedCapsUseLowSpeedBenchValues() {
+    assertEquals(14, RealCartSafetyController.MANUAL_FORWARD);
+    assertEquals(12, RealCartSafetyController.MANUAL_REVERSE);
+    assertEquals(5, RealCartSafetyController.MANUAL_TURN);
+    assertEquals(14, RealCartSafetyController.AUTO_MAX);
+    assertEquals(5, RealCartSafetyController.SEARCH_SPEED);
   }
 
   @Test
