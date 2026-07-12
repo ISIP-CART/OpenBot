@@ -579,6 +579,10 @@ public class Vehicle {
     return bluetoothManager == null ? "unavailable" : bluetoothManager.getWriteStatus();
   }
 
+  public void setBleControlDiagnosticsEnabled(boolean enabled) {
+    if (bluetoothManager != null) bluetoothManager.setControlDiagnosticsEnabled(enabled);
+  }
+
   public boolean isCartFirmwareReady() {
     return isBleSerialReady() && cartFirmwareReady && isReady();
   }

@@ -167,9 +167,11 @@ public class BaseCartFollowFragment extends CameraFragment {
     resetTargetEventButton();
     binding.btnTargetEvent.setOnClickListener(v -> recordTargetEvent());
     binding.diagnosticSwitch.setChecked(false);
+    onDiagnosticLoggingChanged(false);
     binding.diagnosticSwitch.setOnClickListener(
         v -> {
           diagnosticEnabled = binding.diagnosticSwitch.isChecked();
+          onDiagnosticLoggingChanged(diagnosticEnabled);
           if (!diagnosticEnabled) {
             stopDiagnosticSession();
           }
@@ -333,6 +335,12 @@ public class BaseCartFollowFragment extends CameraFragment {
 
   /** Called before the inference thread and diagnostics are stopped. */
   protected void onCartFollowPause() {}
+
+  protected boolean isDiagnosticLoggingEnabled() {
+    return diagnosticEnabled;
+  }
+
+  protected void onDiagnosticLoggingChanged(boolean enabled) {}
 
   @Override
   public void onDestroy() {

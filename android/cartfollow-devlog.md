@@ -1123,3 +1123,47 @@ Debug APK        android/robot/build/outputs/apk/debug/robot-debug.apk
 
 真机仍需在车轮悬空状态验证单指换向、双指抢占、旧手指迟放、最终松手、退后台和 BLE
 断开停车。手动验收通过前不得恢复自动跟随测试。
+
+---
+
+## 19. BLE 控制证据日志与统一触摸路由（2026-07-12）
+
+### 19.1 修改目的
+
+真机换向问题仍未验收，原有日志只能看到 GATT 写成功 payload，不能对齐触摸、pointer、
+generation、队列入队和实际 dispatch。四个按钮各自监听也不能可靠覆盖单指从一个按钮
+滑到另一个按钮的事件路径。
+
+### 19.2 实现
+
+- “记录日志”开关现在同时控制 `CartControl` Logcat 诊断；默认关闭。
+- 触摸日志记录 elapsed realtime、事件、pointer ID、generation 和当前方向。
+- BLE 队列记录 enqueue、transition、dispatch、success、failure、retry、clear、类型、
+  generation、pending 数量和 payload。
+- 四个方向按钮改为由 `manual_drive_controls` 统一接收 MotionEvent，再按子控件坐标路由。
+- 当前 pointer 可在按住期间从 A 滑到 B，并触发有序 `c0,0 -> 新方向`。
+- 第二个 pointer 按下可抢占；旧 pointer 后续移动或释放不能覆盖当前方向。
+- 页面暂停、窗口失焦、模式切换、BLE 断开和 CANCEL 继续停车。
+- 速度保持手动 `14/12/5`、自动 `14/5`；本轮不修改 ESP32 或继续降低速度。
+
+日志查看：
+
+```powershell
+adb logcat -c
+adb logcat -s CartControl:I
+```
+
+ESP32 同时通过 USB 发送 `!D,1`，即可对齐 Android `CartControl` 与下位机
+`motion_rx / motion_target / drive_output / $MSPD`。
+
+### 19.3 验证
+
+```text
+robot 单元测试  30/30
+checkStyle       通过
+assembleDebug    通过
+Debug APK        android/robot/build/outputs/apk/debug/robot-debug.apk
+```
+
+自动化测试不能替代车轮悬空验收。若 Android 日志顺序正确，而 ESP32 `$spd` 或 AT8236
+`$MSPD` 仍显示四轮换向不同步，应转入下位机换向过零联锁和逐轮最低可靠速度测试。

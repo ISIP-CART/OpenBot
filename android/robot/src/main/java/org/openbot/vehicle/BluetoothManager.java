@@ -4,6 +4,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import android.content.Context;
 import android.content.Intent;
+import android.os.SystemClock;
+import android.util.Log;
 import android.widget.Toast;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import com.ficat.easyble.BleDevice;
@@ -36,6 +38,7 @@ public class BluetoothManager {
   private static final String SERVICE_UUID = "61653dc3-4021-4d1e-ba83-8b4eec61d613";
   private static final String RX_UUID = "06386c14-86ea-4d71-811c-48f97c58f8c9";
   private static final String TX_UUID = "9bf1103b-834c-47cf-b149-c9e4bcf778a7";
+  private static final String CONTROL_LOG_TAG = "CartControl";
   private BleManager manager;
   private CharacteristicInfo notifyCharacteristic;
   private CharacteristicInfo writeCharacteristic;
@@ -52,6 +55,7 @@ public class BluetoothManager {
   private final ConnectionListener connectionListener;
   private final BleSerialWriteQueue writeQueue;
   private long motionGeneration;
+  private volatile boolean controlDiagnosticsEnabled;
   private boolean notifyEnabled;
   UUID[] uuidArray = new UUID[] {UUID.fromString(SERVICE_UUID)};
 
@@ -66,7 +70,8 @@ public class BluetoothManager {
               if (this.connectionListener != null) {
                 this.connectionListener.onBleCriticalWriteFailure();
               }
-            });
+            },
+            this::logQueueEvent);
     initBleManager();
     localBroadcastManager = LocalBroadcastManager.getInstance(this.context);
   }
@@ -226,11 +231,17 @@ public class BluetoothManager {
     return writeQueue.getStatus();
   }
 
+  public void setControlDiagnosticsEnabled(boolean enabled) {
+    controlDiagnosticsEnabled = enabled;
+    logControl("diagnostics", "enabled=" + (enabled ? 1 : 0));
+  }
+
   private void writeGatt(String msg) {
     if (!isSerialReady()) {
       writeQueue.onWriteComplete(false);
       return;
     }
+    logControl("gatt_write", "payload=" + sanitize(msg));
     BleManager.getInstance()
         .write(
             bleDevice,
@@ -238,6 +249,35 @@ public class BluetoothManager {
             writeCharacteristic.uuid,
             msg.getBytes(UTF_8),
             writeCallback);
+  }
+
+  private void logQueueEvent(
+      String event,
+      BleSerialWriteQueue.Type type,
+      String payload,
+      long generation,
+      int pendingCount) {
+    logControl(
+        "queue_" + event,
+        "type="
+            + (type == null ? "NONE" : type.name())
+            + ",generation="
+            + generation
+            + ",pending="
+            + pendingCount
+            + ",payload="
+            + sanitize(payload));
+  }
+
+  private void logControl(String event, String details) {
+    if (!controlDiagnosticsEnabled) return;
+    Log.i(
+        CONTROL_LOG_TAG,
+        "ms=" + SystemClock.elapsedRealtime() + ",event=" + event + "," + details);
+  }
+
+  private static String sanitize(String payload) {
+    return payload == null ? "" : payload.trim().replace(',', ';');
   }
 
   private static BleSerialWriteQueue.Type classifyWrite(String msg) {
@@ -268,12 +308,14 @@ public class BluetoothManager {
         public void onWriteSuccess(byte[] data, BleDevice device) {
           String value = new String(data, StandardCharsets.UTF_8);
           Logger.i("write success:" + value);
+          logControl("gatt_success", "payload=" + sanitize(value));
           writeQueue.onWriteComplete(true);
         }
 
         @Override
         public void onFailure(int failCode, String info, BleDevice device) {
           Logger.e("write fail:" + info + " " + failCode);
+          logControl("gatt_failure", "code=" + failCode + ",info=" + info);
           writeQueue.onWriteComplete(false);
         }
       };
