@@ -22,6 +22,10 @@ final class BleSerialWriteQueue {
     void onCriticalWriteFailure(String payload);
   }
 
+  interface EventListener {
+    void onQueueEvent(String event, Type type, String payload, long generation, int pendingCount);
+  }
+
   private static final class Entry {
     final Type type;
     final String payload;
@@ -42,12 +46,19 @@ final class BleSerialWriteQueue {
   private final Deque<Entry> pending = new ArrayDeque<>();
   private final Sender sender;
   private final CriticalFailureListener failureListener;
+  private final EventListener eventListener;
   private Entry inFlight;
   private String status = "idle";
 
   BleSerialWriteQueue(Sender sender, CriticalFailureListener failureListener) {
+    this(sender, failureListener, (event, type, payload, generation, pendingCount) -> {});
+  }
+
+  BleSerialWriteQueue(
+      Sender sender, CriticalFailureListener failureListener, EventListener eventListener) {
     this.sender = sender;
     this.failureListener = failureListener;
+    this.eventListener = eventListener;
   }
 
   synchronized void enqueue(Type type, String payload, long generation) {
@@ -63,6 +74,7 @@ final class BleSerialWriteQueue {
     } else {
       pending.addLast(new Entry(type, payload, generation));
     }
+    eventListener.onQueueEvent("enqueue", type, payload, generation, pending.size());
     dispatchNext();
   }
 
@@ -71,6 +83,8 @@ final class BleSerialWriteQueue {
     // addFirst in reverse order keeps the pair contiguous ahead of heartbeat/query traffic.
     pending.addFirst(new Entry(Type.MOTION, motionPayload, generation));
     pending.addFirst(new Entry(Type.STOP, stopPayload, generation));
+    eventListener.onQueueEvent(
+        "transition", Type.MOTION, motionPayload, generation, pending.size());
     dispatchNext();
   }
 
@@ -80,12 +94,20 @@ final class BleSerialWriteQueue {
     if (!success && completed.isCritical() && completed.retries == 0) {
       completed.retries++;
       status = "retry:" + summarize(completed.payload);
+      eventListener.onQueueEvent(
+          "retry", completed.type, completed.payload, completed.generation, pending.size());
       sender.send(completed.payload);
       return;
     }
 
     inFlight = null;
     status = (success ? "ok:" : "failed:") + summarize(completed.payload);
+    eventListener.onQueueEvent(
+        success ? "success" : "failure",
+        completed.type,
+        completed.payload,
+        completed.generation,
+        pending.size());
     if (!success && completed.isCritical()) {
       pending.clear();
       failureListener.onCriticalWriteFailure(completed.payload);
@@ -98,6 +120,7 @@ final class BleSerialWriteQueue {
     pending.clear();
     inFlight = null;
     status = "cleared";
+    eventListener.onQueueEvent("clear", null, "", 0L, 0);
   }
 
   synchronized String getStatus() {
@@ -116,6 +139,12 @@ final class BleSerialWriteQueue {
     if (inFlight != null || pending.isEmpty()) return;
     inFlight = pending.removeFirst();
     status = "writing:" + summarize(inFlight.payload);
+    eventListener.onQueueEvent(
+        "dispatch",
+        inFlight.type,
+        inFlight.payload,
+        inFlight.generation,
+        pending.size());
     sender.send(inFlight.payload);
   }
 

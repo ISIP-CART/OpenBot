@@ -97,6 +97,23 @@ public class BleSerialWriteQueueTest {
     assertTrue(harness.queue.getStatus().contains("cleared"));
   }
 
+  @Test
+  public void observerReceivesGenerationForEnqueueDispatchAndSuccess() {
+    List<String> events = new ArrayList<>();
+    BleSerialWriteQueue queue =
+        new BleSerialWriteQueue(
+            payload -> {},
+            payload -> {},
+            (event, type, payload, generation, pending) ->
+                events.add(event + ":" + generation + ":" + payload.trim()));
+
+    queue.enqueue(BleSerialWriteQueue.Type.MOTION, "c14,14\n", 7);
+    queue.onWriteComplete(true);
+
+    assertEquals(
+        list("enqueue:7:c14,14", "dispatch:7:c14,14", "success:7:c14,14"), events);
+  }
+
   private static final class Harness {
     final List<String> sent = new ArrayList<>();
     int criticalFailures;

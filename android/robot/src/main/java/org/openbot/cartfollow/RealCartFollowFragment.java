@@ -3,6 +3,7 @@ package org.openbot.cartfollow;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
 import androidx.navigation.Navigation;
@@ -12,12 +13,14 @@ import org.openbot.vehicle.Control;
 
 /** Camera-based cart following with BLE manual control and guarded experimental autonomy. */
 public class RealCartFollowFragment extends BaseCartFollowFragment {
+  private static final String CONTROL_LOG_TAG = "CartControl";
   private static final long COMMAND_REPEAT_MS = 100L;
   private static final long HANDSHAKE_RETRY_MS = 500L;
   private static final long AUTO_UNLOCK_HOLD_MS = 2000L;
 
   private final RealCartSafetyController safetyController = new RealCartSafetyController();
-  private final ManualControlArbiter manualControlArbiter = new ManualControlArbiter();
+  private final ManualTouchRouter manualTouchRouter =
+      new ManualTouchRouter(new ManualControlArbiter());
   private final Handler mainHandler = new Handler(Looper.getMainLooper());
   private volatile RealCartSafetyController.Output latestOutput =
       RealCartSafetyController.stop("idle");
@@ -41,7 +44,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
           RealCartSafetyController.Output watchdog = safetyController.watchdog(now);
           if (watchdog != null) latestOutput = watchdog;
           if (safetyController.getMode() == RealCartSafetyController.Mode.MANUAL
-              && manualControlArbiter.getActiveControl() == null) {
+              && manualTouchRouter.getActiveControl() == null) {
             latestOutput = RealCartSafetyController.stop("manual_idle");
           }
           sendOutput(latestOutput);
@@ -67,26 +70,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
                   : RealCartSafetyController.Mode.MANUAL);
         });
 
-    installDeadMan(
-        binding.driveForward,
-        ManualControlArbiter.Control.FORWARD,
-        RealCartSafetyController.MANUAL_FORWARD,
-        RealCartSafetyController.MANUAL_FORWARD);
-    installDeadMan(
-        binding.driveBackward,
-        ManualControlArbiter.Control.BACKWARD,
-        -RealCartSafetyController.MANUAL_REVERSE,
-        -RealCartSafetyController.MANUAL_REVERSE);
-    installDeadMan(
-        binding.driveLeft,
-        ManualControlArbiter.Control.LEFT,
-        -RealCartSafetyController.MANUAL_TURN,
-        RealCartSafetyController.MANUAL_TURN);
-    installDeadMan(
-        binding.driveRight,
-        ManualControlArbiter.Control.RIGHT,
-        RealCartSafetyController.MANUAL_TURN,
-        -RealCartSafetyController.MANUAL_TURN);
+    installManualTouchRouter();
 
     binding.connectBle.setOnClickListener(
         v -> Navigation.findNavController(requireView()).navigate(R.id.open_bluetooth_fragment));
@@ -138,6 +122,11 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   }
 
   @Override
+  protected void onDiagnosticLoggingChanged(boolean enabled) {
+    if (vehicle != null) vehicle.setBleControlDiagnosticsEnabled(enabled);
+  }
+
+  @Override
   protected boolean isInferenceEnabled() {
     return safetyController.getMode() == RealCartSafetyController.Mode.AUTO
         && safetyController.isAutoUnlocked()
@@ -177,57 +166,142 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
     refreshRealUi();
   }
 
-  private void installDeadMan(
-      View button, ManualControlArbiter.Control control, int left, int right) {
-    button.setOnTouchListener(
-        (view, event) -> {
-          switch (event.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN:
-            case MotionEvent.ACTION_POINTER_DOWN:
-              int downPointerId = event.getPointerId(event.getActionIndex());
-              RealCartSafetyController.Output nextOutput = safetyController.manual(left, right);
-              if (nextOutput.isStop()) {
-                invalidateManualControl("manual_blocked", true);
-                view.setPressed(false);
-                return true;
-              }
+  private void installManualTouchRouter() {
+    binding.driveForward.setClickable(false);
+    binding.driveBackward.setClickable(false);
+    binding.driveLeft.setClickable(false);
+    binding.driveRight.setClickable(false);
+    binding.manualDriveControls.setClickable(true);
+    binding.manualDriveControls.setOnTouchListener((view, event) -> handleManualTouch(event));
+  }
 
-              ManualControlArbiter.PressResult pressResult =
-                  manualControlArbiter.press(control, downPointerId);
-              if (pressResult.replacedActiveControl) {
-                if (activeManualButton != null && activeManualButton != view) {
-                  activeManualButton.setPressed(false);
-                }
-                latestOutput = nextOutput;
-                sendReplacementOutput(nextOutput, pressResult.generation);
-              } else {
-                latestOutput = nextOutput;
-                sendOutput(latestOutput);
-              }
-              activeManualButton = view;
-              view.setPressed(true);
-              return true;
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_POINTER_UP:
-            case MotionEvent.ACTION_OUTSIDE:
-              int upPointerId = event.getPointerId(event.getActionIndex());
-              view.setPressed(false);
-              if (manualControlArbiter.release(control, upPointerId)) {
-                activeManualButton = null;
-                latestOutput = RealCartSafetyController.stop("manual_release");
-                sendOutput(latestOutput);
-              }
-              return true;
-            case MotionEvent.ACTION_CANCEL:
-              view.setPressed(false);
-              if (manualControlArbiter.getActiveControl() == control) {
-                invalidateManualControl("manual_cancel", true);
-              }
-              return true;
-            default:
-              return true;
+  private boolean handleManualTouch(MotionEvent event) {
+    switch (event.getActionMasked()) {
+      case MotionEvent.ACTION_DOWN:
+      case MotionEvent.ACTION_POINTER_DOWN:
+        int downIndex = event.getActionIndex();
+        int downPointerId = event.getPointerId(downIndex);
+        ManualControlArbiter.Control downControl =
+            findManualControl(event.getX(downIndex), event.getY(downIndex));
+        if (downControl != null) handleManualPress(downControl, downPointerId, "down");
+        return true;
+      case MotionEvent.ACTION_MOVE:
+        int activePointerId = manualTouchRouter.getActivePointerId();
+        int activeIndex = event.findPointerIndex(activePointerId);
+        if (activeIndex >= 0) {
+          ManualControlArbiter.Control moveControl =
+              findManualControl(event.getX(activeIndex), event.getY(activeIndex));
+          ManualControlArbiter.PressResult moveResult =
+              manualTouchRouter.move(moveControl, activePointerId);
+          if (moveResult != null) {
+            handleManualDirection(moveControl, activePointerId, moveResult, "move");
           }
-        });
+        }
+        return true;
+      case MotionEvent.ACTION_UP:
+      case MotionEvent.ACTION_POINTER_UP:
+        int upPointerId = event.getPointerId(event.getActionIndex());
+        logTouch("up", upPointerId, manualTouchRouter.getActiveControl());
+        if (manualTouchRouter.release(upPointerId)) {
+          clearManualButtonState();
+          latestOutput = RealCartSafetyController.stop("manual_release");
+          sendOutput(latestOutput);
+        }
+        return true;
+      case MotionEvent.ACTION_CANCEL:
+      case MotionEvent.ACTION_OUTSIDE:
+        logTouch("cancel", manualTouchRouter.getActivePointerId(), manualTouchRouter.getActiveControl());
+        invalidateManualControl("manual_cancel", true);
+        return true;
+      default:
+        return true;
+    }
+  }
+
+  private void handleManualPress(
+      ManualControlArbiter.Control control, int pointerId, String eventName) {
+    ManualControlArbiter.PressResult result = manualTouchRouter.press(control, pointerId);
+    handleManualDirection(control, pointerId, result, eventName);
+  }
+
+  private void handleManualDirection(
+      ManualControlArbiter.Control control,
+      int pointerId,
+      ManualControlArbiter.PressResult pressResult,
+      String eventName) {
+    RealCartSafetyController.Output nextOutput = manualOutput(control);
+    logTouch(eventName, pointerId, control);
+    if (nextOutput.isStop()) {
+      invalidateManualControl("manual_blocked", true);
+      return;
+    }
+
+    clearManualButtonState();
+    activeManualButton = buttonForControl(control);
+    if (activeManualButton != null) activeManualButton.setPressed(true);
+    latestOutput = nextOutput;
+    if (pressResult.replacedActiveControl) {
+      sendReplacementOutput(nextOutput, pressResult.generation);
+    } else {
+      sendOutput(nextOutput);
+    }
+  }
+
+  private RealCartSafetyController.Output manualOutput(ManualControlArbiter.Control control) {
+    switch (control) {
+      case FORWARD:
+        return safetyController.manual(
+            RealCartSafetyController.MANUAL_FORWARD,
+            RealCartSafetyController.MANUAL_FORWARD);
+      case BACKWARD:
+        return safetyController.manual(
+            -RealCartSafetyController.MANUAL_REVERSE,
+            -RealCartSafetyController.MANUAL_REVERSE);
+      case LEFT:
+        return safetyController.manual(
+            -RealCartSafetyController.MANUAL_TURN, RealCartSafetyController.MANUAL_TURN);
+      case RIGHT:
+        return safetyController.manual(
+            RealCartSafetyController.MANUAL_TURN, -RealCartSafetyController.MANUAL_TURN);
+      default:
+        return RealCartSafetyController.stop("manual_unknown");
+    }
+  }
+
+  private ManualControlArbiter.Control findManualControl(float x, float y) {
+    if (contains(binding.driveLeft, x, y)) return ManualControlArbiter.Control.LEFT;
+    if (contains(binding.driveForward, x, y)) return ManualControlArbiter.Control.FORWARD;
+    if (contains(binding.driveBackward, x, y)) return ManualControlArbiter.Control.BACKWARD;
+    if (contains(binding.driveRight, x, y)) return ManualControlArbiter.Control.RIGHT;
+    return null;
+  }
+
+  private static boolean contains(View child, float x, float y) {
+    return child.getVisibility() == View.VISIBLE
+        && x >= child.getLeft()
+        && x < child.getRight()
+        && y >= child.getTop()
+        && y < child.getBottom();
+  }
+
+  private View buttonForControl(ManualControlArbiter.Control control) {
+    switch (control) {
+      case FORWARD:
+        return binding.driveForward;
+      case BACKWARD:
+        return binding.driveBackward;
+      case LEFT:
+        return binding.driveLeft;
+      case RIGHT:
+        return binding.driveRight;
+      default:
+        return null;
+    }
+  }
+
+  private void clearManualButtonState() {
+    if (activeManualButton != null) activeManualButton.setPressed(false);
+    activeManualButton = null;
   }
 
   private void installAutoUnlock() {
@@ -262,9 +336,16 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   }
 
   private void invalidateManualControl(String reason, boolean sendStop) {
-    manualControlArbiter.clear();
-    if (activeManualButton != null) activeManualButton.setPressed(false);
-    activeManualButton = null;
+    logControl(
+        "invalidate",
+        "reason="
+            + reason
+            + ",generation="
+            + manualTouchRouter.getGeneration()
+            + ",direction="
+            + directionName(manualTouchRouter.getActiveControl()));
+    manualTouchRouter.clear();
+    clearManualButtonState();
     latestOutput = RealCartSafetyController.stop(reason);
     if (sendStop) sendOutput(latestOutput);
   }
@@ -290,6 +371,29 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
         generation);
   }
 
+  private void logTouch(
+      String event, int pointerId, ManualControlArbiter.Control control) {
+    logControl(
+        "touch_" + event,
+        "pointer="
+            + pointerId
+            + ",generation="
+            + manualTouchRouter.getGeneration()
+            + ",direction="
+            + directionName(control));
+  }
+
+  private void logControl(String event, String details) {
+    if (!isDiagnosticLoggingEnabled()) return;
+    Log.i(
+        CONTROL_LOG_TAG,
+        "ms=" + SystemClock.elapsedRealtime() + ",event=" + event + "," + details);
+  }
+
+  private static String directionName(ManualControlArbiter.Control control) {
+    return control == null ? "NONE" : control.name();
+  }
+
   private void refreshRealUi() {
     if (binding == null) return;
     requireActivity()
@@ -302,7 +406,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
                       : vehicle.isBleSerialReady() ? "BLE 已连接 · 等待固件握手" : "BLE 未连接";
               String output =
                   latestOutput == null ? "0,0" : latestOutput.left + "," + latestOutput.right;
-              ManualControlArbiter.Control active = manualControlArbiter.getActiveControl();
+              ManualControlArbiter.Control active = manualTouchRouter.getActiveControl();
               binding.realConnectionStatus.setText(
                   connection
                       + " | output="
