@@ -251,6 +251,7 @@ public class BaseCartFollowFragment extends CameraFragment {
     resetRecoveryRelock();
     stopDiagnosticSession();
     stateMachine.cancel();
+    clearDrawState();
     resetUiToIdle();
   }
 
@@ -731,9 +732,17 @@ public class BaseCartFollowFragment extends CameraFragment {
     }
   }
 
-  private void updateCommandText(String text) {
+  protected final void updateCommandText(String text) {
     if (binding == null) return;
     requireActivity().runOnUiThread(() -> binding.commandText.setText(text));
+  }
+
+  synchronized void clearDrawState() {
+    drawBoxes.clear();
+    drawFrameWidth = 0;
+    drawFrameHeight = 0;
+    drawSensorOrientation = 0;
+    if (binding != null) binding.trackingOverlay.postInvalidate();
   }
 
   private void updateUiForState(FollowStateMachine.FrameResult fr) {

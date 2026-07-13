@@ -4,8 +4,11 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-import java.util.Collections;
+import android.graphics.RectF;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.Test;
+import org.openbot.tflite.Detector;
 import org.openbot.vehicle.Control;
 
 public class RealCartAutoDriveControllerTest {
@@ -25,12 +28,35 @@ public class RealCartAutoDriveControllerTest {
   public void stoppedCartCannotStartOffCenterOrAtSetpoint() {
     RealCartAutoDriveController controller = new RealCartAutoDriveController();
     for (int i = 0; i < 5; i++) {
-      assertTrue(controller.update(followFrame(0.3f, 0.79f), i * 30L).isStop());
+      assertTrue(controller.update(followFrame(0.6f, 0.79f), i * 30L).isStop());
     }
     assertTrue(
         controller
             .update(frame(0f, 0.90f, FollowState.FOLLOW, BehaviorAction.FOLLOW_CAUTION), 200L)
             .isStop());
+  }
+
+  @Test
+  public void stoppedCartCanStartWithStableGentleCurve() {
+    RealCartAutoDriveController controller = new RealCartAutoDriveController();
+    assertTrue(controller.update(followFrame(0.30f, 0.75f), 0L).isStop());
+    assertTrue(controller.update(followFrame(0.30f, 0.75f), 30L).isStop());
+
+    RealCartAutoDriveController.Result result =
+        controller.update(followFrame(0.30f, 0.75f), 60L);
+    assertEquals(12, result.left);
+    assertEquals(14, result.right);
+    assertEquals(RealCartAutoDriveController.Phase.CURVE_LEFT, result.phase);
+    assertEquals("小车左缓弯", RealCartFollowFragment.commandForAutoResult(result));
+
+    controller = new RealCartAutoDriveController();
+    controller.update(followFrame(-0.30f, 0.75f), 0L);
+    controller.update(followFrame(-0.30f, 0.75f), 30L);
+    result = controller.update(followFrame(-0.30f, 0.75f), 60L);
+    assertEquals(14, result.left);
+    assertEquals(12, result.right);
+    assertEquals(RealCartAutoDriveController.Phase.CURVE_RIGHT, result.phase);
+    assertEquals("小车右缓弯", RealCartFollowFragment.commandForAutoResult(result));
   }
 
   @Test
@@ -91,6 +117,28 @@ public class RealCartAutoDriveControllerTest {
     assertTrue(timedOut.isStop());
     assertTrue(timedOut.lockout);
     assertEquals(RealCartAutoDriveController.Phase.LOCKED, timedOut.phase);
+    assertEquals("target_missing_timeout", timedOut.reason);
+  }
+
+  @Test
+  public void visiblePersonKeepsStationaryRecoveryAliveAndResetsMissingTimer() {
+    RealCartAutoDriveController controller = movingController();
+    RealCartAutoDriveController.Result visible =
+        controller.update(recoveryFrame(true), 1000L);
+    assertTrue(visible.isStop());
+    assertFalse(visible.lockout);
+    assertEquals("person_visible_reacquire", visible.reason);
+    assertFalse(controller.update(recoveryFrame(true), 11000L).lockout);
+
+    assertFalse(controller.update(recoveryFrame(false), 12000L).lockout);
+    assertFalse(controller.update(recoveryFrame(true), 13500L).lockout);
+    assertFalse(controller.update(recoveryFrame(false), 15000L).lockout);
+    assertTrue(
+        controller
+            .update(
+                recoveryFrame(false),
+                15000L + RealCartAutoDriveController.RECOVERY_LIMIT_MS)
+            .lockout);
   }
 
   private static RealCartAutoDriveController movingController() {
@@ -105,15 +153,37 @@ public class RealCartAutoDriveControllerTest {
     return frame(turn, heightScale, FollowState.FOLLOW, BehaviorAction.FOLLOW_SLOW);
   }
 
+  private static FollowStateMachine.FrameResult recoveryFrame(boolean personVisible) {
+    return frame(
+        0f,
+        Float.NaN,
+        FollowState.IDENTITY_UNCERTAIN,
+        BehaviorAction.MOTION_STOP,
+        personVisible);
+  }
+
   private static FollowStateMachine.FrameResult frame(
       float turn, float heightScale, FollowState state, BehaviorAction action) {
+    return frame(turn, heightScale, state, action, false);
+  }
+
+  private static FollowStateMachine.FrameResult frame(
+      float turn,
+      float heightScale,
+      FollowState state,
+      BehaviorAction action,
+      boolean personVisible) {
+    List<Detector.Recognition> persons = new ArrayList<>();
+    if (personVisible) {
+      persons.add(new Detector.Recognition("1", "person", 0.9f, new RectF(1, 1, 10, 20), 0));
+    }
     FollowStateMachine.FrameResult frame =
         new FollowStateMachine.FrameResult(
             state,
             new Control(0.6f - turn, 0.6f + turn),
             null,
             null,
-            Collections.emptyList(),
+            persons,
             true,
             false,
             null,

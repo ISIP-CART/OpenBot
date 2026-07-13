@@ -66,7 +66,7 @@ public final class RealCartAutoDriveController {
   private boolean hasFilteredTurn;
   private float filteredTurn;
   private int centeredFrames;
-  private long recoveryStartMs = -1L;
+  private long targetMissingStartMs = -1L;
   private Result lastResult = stopped(Phase.LOCKED, "auto_locked", false, 0f, 0f, Float.NaN);
 
   public synchronized Result update(FollowStateMachine.FrameResult frame, long nowMs) {
@@ -80,10 +80,10 @@ public final class RealCartAutoDriveController {
     float rawTurn = turnFrom(frame.control);
 
     if (isRecoveryDecision(frame, decision)) {
-      return recoveryStop(nowMs, rawTurn, heightScale, decision.actionReason);
+      return recoveryStop(frame, nowMs, rawTurn, heightScale, decision.actionReason);
     }
 
-    recoveryStartMs = -1L;
+    targetMissingStartMs = -1L;
     if (decision.selectedAction != BehaviorAction.FOLLOW_SLOW
         || frame.state != FollowState.FOLLOW
         || frame.distanceEstimate == null
@@ -100,7 +100,7 @@ public final class RealCartAutoDriveController {
     }
 
     if (!moving) {
-      if (heightScale <= START_HEIGHT_SCALE && absTurn <= CENTER_TURN_LIMIT) {
+      if (heightScale <= START_HEIGHT_SCALE && absTurn <= CURVE_TURN_LIMIT) {
         centeredFrames++;
       } else {
         centeredFrames = 0;
@@ -116,19 +116,69 @@ public final class RealCartAutoDriveController {
       }
       moving = true;
       centeredFrames = 0;
-      return remember(
-          new Result(
-              STRAIGHT_SPEED,
-              STRAIGHT_SPEED,
-              Phase.MOVING_STRAIGHT,
-              "centered_follow",
-              rawTurn,
-              filteredTurn,
-              heightScale,
-              false));
+      return drive(rawTurn, filteredTurn, heightScale);
     }
 
-    if (absTurn <= CENTER_TURN_LIMIT) {
+    return drive(rawTurn, filteredTurn, heightScale);
+  }
+
+  public synchronized Result reset(String reason) {
+    moving = false;
+    hasFilteredTurn = false;
+    filteredTurn = 0f;
+    centeredFrames = 0;
+    targetMissingStartMs = -1L;
+    return remember(stopped(Phase.LOCKED, reason, false, 0f, 0f, Float.NaN));
+  }
+
+  public synchronized Result getLastResult() {
+    return lastResult;
+  }
+
+  private Result recoveryStop(
+      FollowStateMachine.FrameResult frame,
+      long nowMs,
+      float rawTurn,
+      float heightScale,
+      String reason) {
+    moving = false;
+    centeredFrames = 0;
+    boolean personVisible = frame.persons != null && !frame.persons.isEmpty();
+    if (personVisible) {
+      targetMissingStartMs = -1L;
+      return remember(
+          stopped(
+              Phase.RECOVERY_STOP,
+              "person_visible_reacquire",
+              false,
+              rawTurn,
+              filteredTurn,
+              heightScale));
+    }
+    if (targetMissingStartMs < 0L) targetMissingStartMs = nowMs;
+    boolean lockout = nowMs - targetMissingStartMs >= RECOVERY_LIMIT_MS;
+    if (lockout) {
+      return remember(
+          stopped(
+              Phase.LOCKED,
+              "target_missing_timeout",
+              true,
+              rawTurn,
+              filteredTurn,
+              heightScale));
+    }
+    return remember(
+        stopped(
+            Phase.RECOVERY_STOP,
+            reason == null ? "target_recovery" : reason,
+            false,
+            rawTurn,
+            filteredTurn,
+            heightScale));
+  }
+
+  private Result drive(float rawTurn, float filteredTurn, float heightScale) {
+    if (Math.abs(filteredTurn) <= CENTER_TURN_LIMIT) {
       return remember(
           new Result(
               STRAIGHT_SPEED,
@@ -154,38 +204,6 @@ public final class RealCartAutoDriveController {
             filteredTurn,
             heightScale,
             false));
-  }
-
-  public synchronized Result reset(String reason) {
-    moving = false;
-    hasFilteredTurn = false;
-    filteredTurn = 0f;
-    centeredFrames = 0;
-    recoveryStartMs = -1L;
-    return remember(stopped(Phase.LOCKED, reason, false, 0f, 0f, Float.NaN));
-  }
-
-  public synchronized Result getLastResult() {
-    return lastResult;
-  }
-
-  private Result recoveryStop(long nowMs, float rawTurn, float heightScale, String reason) {
-    moving = false;
-    centeredFrames = 0;
-    if (recoveryStartMs < 0L) recoveryStartMs = nowMs;
-    boolean lockout = nowMs - recoveryStartMs >= RECOVERY_LIMIT_MS;
-    if (lockout) {
-      return remember(
-          stopped(Phase.LOCKED, "recovery_timeout", true, rawTurn, filteredTurn, heightScale));
-    }
-    return remember(
-        stopped(
-            Phase.RECOVERY_STOP,
-            reason == null ? "target_recovery" : reason,
-            false,
-            rawTurn,
-            filteredTurn,
-            heightScale));
   }
 
   private Result stopNonRecovery(Phase phase, String reason, float rawTurn, float heightScale) {

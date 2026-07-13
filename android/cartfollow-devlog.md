@@ -1284,3 +1284,34 @@ FollowSessionGuard Robolectric  2/2
 :robot:assembleDebug            通过
 Debug APK                       android/robot/build/outputs/apk/debug/robot-debug.apk
 ```
+
+### 20.7 可见人物重捕与静止缓弯修复
+
+悬空自动跟随测试又发现两个容易混淆的现象：Start 关闭后最后一帧绿框仍停在画面上；
+视觉层显示“左转 / 右转”时，真实车轮速仍可能是 `c0,0`。前者是会话清理没有清空
+Overlay，后者是公共视觉建议与真实车安全整形输出使用了不同口径。
+
+真实车现改为：
+
+- 身份不确定但画面仍检测到人物时，持续输出 `c0,0` 并保持 Start，继续 ReID 和轨迹重捕；
+- 只有连续 2 秒完全检测不到人物时，才以 `target_missing_timeout` 结束会话；
+- 会话结束时同步清空检测框、目标标签和最后一帧绘制状态；
+- 停车状态下，可信目标连续 3 帧处于可缓弯范围后可直接输出 `c12,14` 或 `c14,12`；
+- 横向偏差超过 `0.45` 时仍停车，不开放倒车或原地转向；
+- 主提示改为真实输出对应的“直行 / 左缓弯 / 右缓弯 / 停车等待 / 停车重捕”，
+  公共视觉建议只保留在详细诊断中；
+- 页面保留 `last_end`，并用始终开启的 `CartFollow_Session` 低频日志记录 Start 和结束原因。
+
+Human Cart Simulator 的 18 秒身份不确定/搜索窗口不变；只有真实车实例关闭共享终态计时，
+由连续无人 2 秒的安全门负责结束自动会话。
+
+本轮实际验证结果：
+
+```text
+RealCartAutoDriveControllerTest  7/7
+FollowSessionGuardTest          3/3
+全部 Debug 单元测试             45/45
+:robot:check                    通过
+:robot:assembleDebug            通过
+Debug APK                       android/robot/build/outputs/apk/debug/robot-debug.apk
+```

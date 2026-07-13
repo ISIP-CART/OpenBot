@@ -7,6 +7,8 @@ import static org.junit.Assert.assertTrue;
 import android.content.Context;
 import android.view.View;
 import androidx.test.core.app.ApplicationProvider;
+import java.lang.reflect.Field;
+import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -38,5 +40,19 @@ public class FollowSessionGuardTest {
     assertFalse(
         BaseCartFollowFragment.updateConfirmationVisibility(panel, false, FollowState.IDLE));
     assertEquals(View.GONE, panel.getVisibility());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void clearingSessionDrawStateRemovesFrozenOverlayBoxes() throws Exception {
+    BaseCartFollowFragment fragment = new HumanCartSimulatorFragment();
+    Field drawBoxesField = BaseCartFollowFragment.class.getDeclaredField("drawBoxes");
+    drawBoxesField.setAccessible(true);
+    List<Object> drawBoxes = (List<Object>) drawBoxesField.get(fragment);
+    drawBoxes.add(null);
+
+    fragment.clearDrawState();
+
+    assertTrue(drawBoxes.isEmpty());
   }
 }

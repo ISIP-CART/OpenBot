@@ -6,8 +6,11 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import java.util.Collections;
+import android.graphics.RectF;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.Test;
+import org.openbot.tflite.Detector;
 import org.openbot.vehicle.Control;
 
 public class RealCartSafetyControllerTest {
@@ -125,6 +128,27 @@ public class RealCartSafetyControllerTest {
   }
 
   @Test
+  public void visiblePersonRecoveryStaysStoppedWithoutRevokingUnlock() {
+    RealCartSafetyController controller = readyAutoController();
+    assertTrue(controller.unlockAuto());
+    controller.setAutoRunEnabled(true, 900L);
+    FollowStateMachine.FrameResult frame =
+        frame(new Control(0f, 0f), BehaviorAction.MOTION_STOP, true);
+    frame.behaviorDecision =
+        new BehaviorDecisionResult(
+            FollowState.IDENTITY_UNCERTAIN,
+            BehaviorAction.MOTION_STOP,
+            "identity_uncertain",
+            null,
+            0f);
+
+    assertTrue(controller.auto(frame, 1000L).isStop());
+    assertTrue(controller.auto(frame, 11_000L).isStop());
+    assertTrue(controller.isAutoUnlocked());
+    assertNull(controller.watchdog(60_000L));
+  }
+
+  @Test
   public void emergencyLatchBlocksEveryMotionRequest() {
     RealCartSafetyController controller = new RealCartSafetyController();
     controller.setForeground(true);
@@ -142,13 +166,22 @@ public class RealCartSafetyControllerTest {
   }
 
   private static FollowStateMachine.FrameResult frame(Control control, BehaviorAction action) {
+    return frame(control, action, false);
+  }
+
+  private static FollowStateMachine.FrameResult frame(
+      Control control, BehaviorAction action, boolean personVisible) {
+    List<Detector.Recognition> persons = new ArrayList<>();
+    if (personVisible) {
+      persons.add(new Detector.Recognition("1", "person", 0.9f, new RectF(1, 1, 10, 20), 0));
+    }
     FollowStateMachine.FrameResult frame =
         new FollowStateMachine.FrameResult(
             FollowState.FOLLOW,
             control,
             null,
             null,
-            Collections.emptyList(),
+            persons,
             true,
             false,
             null,
