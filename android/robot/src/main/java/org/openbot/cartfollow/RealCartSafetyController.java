@@ -35,6 +35,7 @@ public final class RealCartSafetyController {
   private boolean firmwareReady;
   private boolean autoUnlocked;
   private boolean autoRunEnabled;
+  private boolean autoMotionActive;
   private boolean emergencyLatched;
   private long lastInferenceMs = -1L;
   private final RealCartAutoDriveController autoDriveController = new RealCartAutoDriveController();
@@ -44,6 +45,7 @@ public final class RealCartSafetyController {
     if (!foreground) {
       autoUnlocked = false;
       autoRunEnabled = false;
+      autoMotionActive = false;
       autoDriveController.reset("background");
     }
   }
@@ -54,6 +56,7 @@ public final class RealCartSafetyController {
     if (!connected || !firmwareReady) {
       autoUnlocked = false;
       autoRunEnabled = false;
+      autoMotionActive = false;
       autoDriveController.reset("ble_not_ready");
     }
   }
@@ -62,6 +65,7 @@ public final class RealCartSafetyController {
     this.mode = mode;
     autoUnlocked = false;
     autoRunEnabled = false;
+    autoMotionActive = false;
     lastInferenceMs = -1L;
     autoDriveController.reset("mode_change");
   }
@@ -82,6 +86,7 @@ public final class RealCartSafetyController {
 
   public synchronized void setAutoRunEnabled(boolean enabled, long nowMs) {
     autoRunEnabled = enabled;
+    autoMotionActive = false;
     lastInferenceMs = enabled ? nowMs : -1L;
     autoDriveController.reset(enabled ? "start_arming" : "start_off");
   }
@@ -90,6 +95,7 @@ public final class RealCartSafetyController {
     emergencyLatched = true;
     autoUnlocked = false;
     autoRunEnabled = false;
+    autoMotionActive = false;
     autoDriveController.reset("emergency_stop");
   }
 
@@ -105,14 +111,19 @@ public final class RealCartSafetyController {
   public synchronized Output auto(FollowStateMachine.FrameResult frame, long nowMs) {
     lastInferenceMs = nowMs;
     if (!canMove() || mode != Mode.AUTO || !autoUnlocked || !autoRunEnabled || frame == null) {
+      autoMotionActive = false;
       return stop("auto_blocked");
     }
 
     BehaviorDecisionResult decision = frame.behaviorDecision;
-    if (decision == null) return stop("decision_missing");
+    if (decision == null) {
+      autoMotionActive = false;
+      return stop("decision_missing");
+    }
     RealCartAutoDriveController.Result result = autoDriveController.update(frame, nowMs);
     if (result.lockout) autoUnlocked = false;
     if (result.lockout) autoRunEnabled = false;
+    autoMotionActive = result.left != 0 || result.right != 0;
     return new Output(result.left, result.right, result.reason);
   }
 
@@ -120,9 +131,11 @@ public final class RealCartSafetyController {
     if (mode == Mode.AUTO
         && autoUnlocked
         && autoRunEnabled
+        && autoMotionActive
         && nowMs - lastInferenceMs > INFERENCE_TIMEOUT_MS) {
       autoUnlocked = false;
       autoRunEnabled = false;
+      autoMotionActive = false;
       autoDriveController.reset("inference_timeout");
       return stop("inference_timeout");
     }
@@ -136,6 +149,7 @@ public final class RealCartSafetyController {
   public synchronized Output resetAutoDrive(String reason, boolean revokeUnlock) {
     if (revokeUnlock) autoUnlocked = false;
     autoRunEnabled = false;
+    autoMotionActive = false;
     autoDriveController.reset(reason);
     lastInferenceMs = -1L;
     return stop(reason);

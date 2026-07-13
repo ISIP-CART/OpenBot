@@ -4,6 +4,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import android.content.Context;
 import android.content.Intent;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import android.widget.Toast;
@@ -14,7 +16,6 @@ import com.ficat.easyble.Logger;
 import com.ficat.easyble.gatt.bean.CharacteristicInfo;
 import com.ficat.easyble.gatt.bean.ServiceInfo;
 import com.ficat.easyble.gatt.callback.BleConnectCallback;
-import com.ficat.easyble.gatt.callback.BleMtuCallback;
 import com.ficat.easyble.gatt.callback.BleNotifyCallback;
 import com.ficat.easyble.gatt.callback.BleWriteCallback;
 import com.ficat.easyble.scan.BleScanCallback;
@@ -27,6 +28,16 @@ import org.openbot.main.ScanDeviceAdapter;
 import org.openbot.utils.Constants;
 
 public class BluetoothManager {
+  public enum ConnectionState {
+    DISCONNECTED,
+    CONNECTING,
+    ENABLING_NOTIFY,
+    SERIAL_READY,
+    RETRYING,
+    DISCONNECTING,
+    FAILED
+  }
+
   public interface ConnectionListener {
     void onBleSerialReady();
 
@@ -39,6 +50,10 @@ public class BluetoothManager {
   private static final String RX_UUID = "06386c14-86ea-4d71-811c-48f97c58f8c9";
   private static final String TX_UUID = "9bf1103b-834c-47cf-b149-c9e4bcf778a7";
   private static final String CONTROL_LOG_TAG = "CartControl";
+  private static final long SERIAL_SETUP_TIMEOUT_MS = 3000L;
+  private static final long RETRY_DELAY_MS = 750L;
+  private static final long DISCONNECT_FALLBACK_MS = 1500L;
+  private static final int MAX_AUTO_RETRIES = 1;
   private BleManager manager;
   private CharacteristicInfo notifyCharacteristic;
   private CharacteristicInfo writeCharacteristic;
@@ -54,7 +69,16 @@ public class BluetoothManager {
   private final LocalBroadcastManager localBroadcastManager;
   private final ConnectionListener connectionListener;
   private final BleSerialWriteQueue writeQueue;
+  private final Handler mainHandler = new Handler(Looper.getMainLooper());
   private long motionGeneration;
+  private long connectionGeneration;
+  private int autoRetryCount;
+  private ConnectionState connectionState = ConnectionState.DISCONNECTED;
+  private String activeAddress;
+  private String lastConnectionError = "";
+  private BleDevice retryDevice;
+  private int retryIndex;
+  private boolean retryAfterDisconnect;
   private volatile boolean controlDiagnosticsEnabled;
   private boolean notifyEnabled;
   UUID[] uuidArray = new UUID[] {UUID.fromString(SERVICE_UUID)};
@@ -70,6 +94,7 @@ public class BluetoothManager {
               if (this.connectionListener != null) {
                 this.connectionListener.onBleCriticalWriteFailure();
               }
+              handleCriticalWriteFailure(payload);
             },
             this::logQueueEvent);
     initBleManager();
@@ -135,65 +160,90 @@ public class BluetoothManager {
     manager.stopScan();
   }
 
-  public void toggleConnection(int position, BleDevice device) {
-    if (bleDevice.connecting) return;
-    indexValue = position;
-    if (isBleConnected()) {
-      if (bleDevice.address.equals(device.address)) {
-        BleManager.getInstance().disconnect(bleDevice.address);
-        bleDevice = null;
-      }
-    } else {
-      BleManager.getInstance().connect(bleDevice.address, connectCallback);
+  public synchronized void toggleConnection(int position, BleDevice device) {
+    if (device == null) return;
+    if (connectionState == ConnectionState.CONNECTING
+        || connectionState == ConnectionState.ENABLING_NOTIFY
+        || connectionState == ConnectionState.RETRYING
+        || connectionState == ConnectionState.DISCONNECTING) return;
+
+    if (isBleConnected() && device.address.equals(activeAddress)) {
+      beginUserDisconnect();
+      return;
     }
+    if (isBleConnected()) {
+      Toast.makeText(context, "请先断开当前 BLE 设备", Toast.LENGTH_SHORT).show();
+      return;
+    }
+    beginConnection(position, device, 0);
   }
 
-  public BleConnectCallback connectCallback =
-      new BleConnectCallback() {
-        @Override
-        public void onStart(boolean startConnectSuccess, String info, BleDevice device) {
+  private synchronized void beginConnection(int position, BleDevice device, int retryCount) {
+    cancelConnectionTimers();
+    clearTransportState();
+    if (connectionListener != null) connectionListener.onBleDisconnected();
+    indexValue = safeDeviceIndex(position, device);
+    bleDevice = device;
+    activeAddress = device.address;
+    autoRetryCount = retryCount;
+    retryAfterDisconnect = false;
+    retryDevice = null;
+    connectionGeneration++;
+    long generation = connectionGeneration;
+    connectionState = retryCount > 0 ? ConnectionState.RETRYING : ConnectionState.CONNECTING;
+    lastConnectionError = "";
+    device.connecting = true;
+    device.connected = false;
+    replaceDeviceAtIndex(indexValue, device);
+    logConnection("connect_start", generation, device, "retry=" + retryCount);
+    manager.connect(device, createConnectCallback(generation, device.address));
+  }
+
+  private BleConnectCallback createConnectCallback(long generation, String address) {
+    return new BleConnectCallback() {
+      @Override
+      public void onStart(boolean startConnectSuccess, String info, BleDevice device) {
+        if (!isActiveAttempt(generation, address)) return;
+        if (!startConnectSuccess) {
+          handleConnectionFailure(generation, device, "connect_start_failed: " + info);
+        }
+      }
+
+      @Override
+      public void onConnected(BleDevice device) {
+        if (!isActiveAttempt(generation, address)) return;
+        synchronized (BluetoothManager.this) {
           bleDevice = device;
-          deviceList.remove(indexValue);
-          deviceList.add(indexValue, device);
-          notifyAdapter();
+          device.connecting = false;
+          device.connected = true;
+          connectionState = ConnectionState.ENABLING_NOTIFY;
+          replaceDeviceAtIndex(indexValue, device);
+          logConnection("gatt_connected", generation, device, "services_ready");
+          configureSerialCharacteristics(generation, device);
         }
+      }
 
-        @Override
-        public void onConnected(BleDevice device) {
-          bleDevice = device;
-          deviceList.remove(indexValue);
-          deviceList.add(indexValue, device);
-          notifyAdapter();
-          addDeviceInfoDataAndUpdate();
-          Logger.i("Successfully connected: " + " " + device);
-        }
+      @Override
+      public void onDisconnected(String info, int status, BleDevice device) {
+        if (!isActiveAttempt(generation, address)) return;
+        handleDisconnected(generation, device, info + ",status=" + status);
+      }
 
-        @Override
-        public void onDisconnected(String info, int status, BleDevice device) {
-          bleDevice = null;
-          writeQueue.clear();
-          clearSerialCharacteristics();
-          if (connectionListener != null) connectionListener.onBleDisconnected();
-          notifyAdapter();
-          Logger.i("disconnected!");
-        }
+      @Override
+      public void onFailure(int failCode, String info, BleDevice device) {
+        if (!isActiveAttempt(generation, address)) return;
+        handleConnectionFailure(
+            generation, device, "connect_failed code=" + failCode + ": " + info);
+      }
+    };
+  }
 
-        @Override
-        public void onFailure(int failCode, String info, BleDevice device) {
-          Logger.e("connect fail:" + info);
-          bleDevice = null;
-          deviceList.remove(indexValue);
-          deviceList.add(indexValue, device);
-          Toast.makeText(context, "Connection fail: " + info, Toast.LENGTH_LONG).show();
-          notifyAdapter();
-        }
-      };
-
-  public void addDeviceInfoDataAndUpdate() {
-    if (bleDevice == null) return;
+  private void configureSerialCharacteristics(long generation, BleDevice device) {
+    if (!isActiveAttempt(generation, device.address)) return;
     Map<ServiceInfo, List<CharacteristicInfo>> deviceInfo =
-        BleManager.getInstance().getDeviceServices(bleDevice.address);
+        manager.getDeviceServices(device.address);
     if (deviceInfo == null) {
+      handleConnectionFailure(generation, device, "service_list_missing");
       return;
     }
     for (Map.Entry<ServiceInfo, List<CharacteristicInfo>> e : deviceInfo.entrySet()) {
@@ -202,9 +252,6 @@ public class BluetoothManager {
         if (TX_UUID.equalsIgnoreCase(characteristicInfo.uuid) && characteristicInfo.notify) {
           notifyCharacteristic = characteristicInfo;
           notifyServiceInfo = e.getKey();
-          if (isBleConnected())
-            // Set the MTU size to 64 bytes
-            BleManager.getInstance().setMtu(bleDevice, 64, mtuCallback);
         }
         if (RX_UUID.equalsIgnoreCase(characteristicInfo.uuid) && characteristicInfo.writable) {
           writeServiceInfo = e.getKey();
@@ -212,6 +259,23 @@ public class BluetoothManager {
         }
       }
     }
+    if (writeServiceInfo == null
+        || writeCharacteristic == null
+        || notifyServiceInfo == null
+        || notifyCharacteristic == null) {
+      handleConnectionFailure(generation, device, "required_characteristic_missing");
+      return;
+    }
+
+    // All control and handshake messages fit the default MTU. Enabling notifications directly
+    // avoids EasyBLE 2.0.2 getting stuck when an MTU request fails without a failure callback.
+    manager.notify(
+        device,
+        notifyServiceInfo.uuid,
+        notifyCharacteristic.uuid,
+        createNotifyCallback(generation, device.address));
+    mainHandler.postDelayed(
+        () -> handleSerialSetupTimeout(generation, device), SERIAL_SETUP_TIMEOUT_MS);
   }
 
   public synchronized void write(String msg) {
@@ -242,13 +306,14 @@ public class BluetoothManager {
       return;
     }
     logControl("gatt_write", "payload=" + sanitize(msg));
-    BleManager.getInstance()
-        .write(
-            bleDevice,
-            writeServiceInfo.uuid,
-            writeCharacteristic.uuid,
-            msg.getBytes(UTF_8),
-            writeCallback);
+    long generation = connectionGeneration;
+    String address = activeAddress;
+    manager.write(
+        bleDevice,
+        writeServiceInfo.uuid,
+        writeCharacteristic.uuid,
+        msg.getBytes(UTF_8),
+        createWriteCallback(generation, address));
   }
 
   private void logQueueEvent(
@@ -272,8 +337,7 @@ public class BluetoothManager {
   private void logControl(String event, String details) {
     if (!controlDiagnosticsEnabled) return;
     Log.i(
-        CONTROL_LOG_TAG,
-        "ms=" + SystemClock.elapsedRealtime() + ",event=" + event + "," + details);
+        CONTROL_LOG_TAG, "ms=" + SystemClock.elapsedRealtime() + ",event=" + event + "," + details);
   }
 
   private static String sanitize(String payload) {
@@ -289,68 +353,292 @@ public class BluetoothManager {
     return BleSerialWriteQueue.Type.QUERY;
   }
 
-  public BleMtuCallback mtuCallback =
-      new BleMtuCallback() {
-        @Override
-        public void onMtuChanged(int mtu, BleDevice device) {
-          BleManager.getInstance()
-              .notify(bleDevice, notifyServiceInfo.uuid, notifyCharacteristic.uuid, notifyCallback);
-        }
+  private BleWriteCallback createWriteCallback(long generation, String address) {
+    return new BleWriteCallback() {
+      @Override
+      public void onWriteSuccess(byte[] data, BleDevice device) {
+        if (!isActiveAttempt(generation, address)) return;
+        String value = new String(data, StandardCharsets.UTF_8);
+        Logger.i("write success:" + value);
+        logControl("gatt_success", "payload=" + sanitize(value));
+        writeQueue.onWriteComplete(true);
+      }
 
-        @Override
-        public void onFailure(int failCode, String info, BleDevice device) {
-          Logger.e("mtu fail:" + info + " " + failCode);
-        }
-      };
-  public BleWriteCallback writeCallback =
-      new BleWriteCallback() {
-        @Override
-        public void onWriteSuccess(byte[] data, BleDevice device) {
-          String value = new String(data, StandardCharsets.UTF_8);
-          Logger.i("write success:" + value);
-          logControl("gatt_success", "payload=" + sanitize(value));
-          writeQueue.onWriteComplete(true);
-        }
+      @Override
+      public void onFailure(int failCode, String info, BleDevice device) {
+        if (!isActiveAttempt(generation, address)) return;
+        Logger.e("write fail:" + info + " " + failCode);
+        logControl("gatt_failure", "code=" + failCode + ",info=" + info);
+        writeQueue.onWriteComplete(false);
+      }
+    };
+  }
 
-        @Override
-        public void onFailure(int failCode, String info, BleDevice device) {
-          Logger.e("write fail:" + info + " " + failCode);
-          logControl("gatt_failure", "code=" + failCode + ",info=" + info);
-          writeQueue.onWriteComplete(false);
-        }
-      };
+  private BleNotifyCallback createNotifyCallback(long generation, String address) {
+    return new BleNotifyCallback() {
+      @Override
+      public void onCharacteristicChanged(byte[] data, BleDevice device) {
+        if (!isActiveAttempt(generation, address)) return;
+        readValue = new String(data);
+        onSerialDataReceived(readValue);
+      }
 
-  public BleNotifyCallback notifyCallback =
-      new BleNotifyCallback() {
-        @Override
-        public void onCharacteristicChanged(byte[] data, BleDevice device) {
-          readValue = new String(data);
-          onSerialDataReceived(readValue);
+      @Override
+      public void onNotifySuccess(String notifySuccessUuid, BleDevice device) {
+        if (!isActiveAttempt(generation, address)) return;
+        if (!notifySuccessUuids.contains(notifySuccessUuid)) {
+          notifySuccessUuids.add(notifySuccessUuid);
         }
+        if (TX_UUID.equalsIgnoreCase(notifySuccessUuid)) {
+          notifyEnabled = true;
+          connectionState = ConnectionState.SERIAL_READY;
+          lastConnectionError = "";
+          cancelConnectionTimers();
+          logConnection("serial_ready", generation, device, "notify_enabled");
+          notifyAdapter();
+          if (connectionListener != null) connectionListener.onBleSerialReady();
+        }
+      }
 
-        @Override
-        public void onNotifySuccess(String notifySuccessUuid, BleDevice device) {
-          if (!notifySuccessUuids.contains(notifySuccessUuid)) {
-            notifySuccessUuids.add(notifySuccessUuid);
+      @Override
+      public void onFailure(int failCode, String info, BleDevice device) {
+        if (!isActiveAttempt(generation, address)) return;
+        handleConnectionFailure(generation, device, "notify_failed code=" + failCode + ": " + info);
+      }
+    };
+  }
+
+  private synchronized void handleSerialSetupTimeout(long generation, BleDevice device) {
+    if (!isActiveAttempt(generation, device.address)
+        || connectionState != ConnectionState.ENABLING_NOTIFY) return;
+    handleConnectionFailure(generation, device, "notify_setup_timeout");
+  }
+
+  private synchronized void handleCriticalWriteFailure(String payload) {
+    if (bleDevice == null || activeAddress == null) return;
+    handleConnectionFailure(
+        connectionGeneration, bleDevice, "critical_write_failure: " + sanitize(payload));
+  }
+
+  private synchronized void handleConnectionFailure(
+      long generation, BleDevice device, String reason) {
+    if (device == null || !isActiveAttempt(generation, device.address)) return;
+    cancelConnectionTimers();
+    lastConnectionError = reason;
+    clearTransportState();
+    if (connectionListener != null) connectionListener.onBleDisconnected();
+    logConnection("connection_failure", generation, device, reason);
+
+    if (shouldAutoRetry(autoRetryCount)) {
+      autoRetryCount++;
+      retryDevice = device;
+      retryIndex = safeDeviceIndex(indexValue, device);
+      connectionState = ConnectionState.RETRYING;
+      retryAfterDisconnect = device.connected;
+      device.connecting = false;
+      replaceDeviceAtIndex(retryIndex, device);
+      notifyAdapter();
+      if (device.connected) {
+        manager.disconnect(device.address);
+        mainHandler.postDelayed(
+            () -> forceRetryAfterDisconnectTimeout(generation, device), DISCONNECT_FALLBACK_MS);
+      } else {
+        scheduleRetry(generation);
+      }
+      return;
+    }
+
+    failAfterRetries(device, reason);
+  }
+
+  private synchronized void handleDisconnected(long generation, BleDevice device, String details) {
+    if (device == null || !isActiveAttempt(generation, device.address)) return;
+    cancelConnectionTimers();
+    device.connecting = false;
+    device.connected = false;
+    clearTransportState();
+    if (connectionListener != null) connectionListener.onBleDisconnected();
+    logConnection("disconnected", generation, device, details);
+
+    if (connectionState == ConnectionState.RETRYING && retryAfterDisconnect) {
+      retryAfterDisconnect = false;
+      replaceDeviceAtIndex(retryIndex, device);
+      notifyAdapter();
+      scheduleRetry(generation);
+      return;
+    }
+
+    connectionState = ConnectionState.DISCONNECTED;
+    bleDevice = null;
+    activeAddress = null;
+    autoRetryCount = 0;
+    replaceDeviceAtIndex(safeDeviceIndex(indexValue, device), device);
+    notifyAdapter();
+  }
+
+  private synchronized void beginUserDisconnect() {
+    if (bleDevice == null || activeAddress == null) return;
+    cancelConnectionTimers();
+    connectionState = ConnectionState.DISCONNECTING;
+    retryAfterDisconnect = false;
+    long generation = connectionGeneration;
+    BleDevice device = bleDevice;
+    logConnection("user_disconnect", generation, device, "requested");
+    notifyAdapter();
+    manager.disconnect(activeAddress);
+    mainHandler.postDelayed(
+        () -> forceUserDisconnectTimeout(generation, device), DISCONNECT_FALLBACK_MS);
+  }
+
+  private synchronized void forceRetryAfterDisconnectTimeout(long generation, BleDevice device) {
+    if (!isActiveAttempt(generation, device.address) || connectionState != ConnectionState.RETRYING)
+      return;
+    logConnection("disconnect_timeout", generation, device, "hard_reset_before_retry");
+    hardResetBleStack();
+    scheduleRetry(connectionGeneration);
+  }
+
+  private synchronized void forceUserDisconnectTimeout(long generation, BleDevice device) {
+    if (!isActiveAttempt(generation, device.address)
+        || connectionState != ConnectionState.DISCONNECTING) return;
+    logConnection("disconnect_timeout", generation, device, "hard_reset_after_user_disconnect");
+    hardResetBleStack();
+    device.connecting = false;
+    device.connected = false;
+    connectionState = ConnectionState.DISCONNECTED;
+    bleDevice = null;
+    activeAddress = null;
+    replaceDeviceAtIndex(safeDeviceIndex(indexValue, device), device);
+    if (connectionListener != null) connectionListener.onBleDisconnected();
+    notifyAdapter();
+  }
+
+  private void scheduleRetry(long generation) {
+    mainHandler.postDelayed(
+        () -> {
+          synchronized (BluetoothManager.this) {
+            if (connectionState != ConnectionState.RETRYING
+                || connectionGeneration != generation
+                || retryDevice == null) return;
+            beginConnection(retryIndex, retryDevice, autoRetryCount);
           }
-          if (TX_UUID.equalsIgnoreCase(notifySuccessUuid) && connectionListener != null) {
-            notifyEnabled = true;
-            connectionListener.onBleSerialReady();
-          }
-        }
+        },
+        RETRY_DELAY_MS);
+  }
 
-        @Override
-        public void onFailure(int failCode, String info, BleDevice device) {
-          Logger.e("notify fail:" + info);
-        }
-      };
+  private synchronized void failAfterRetries(BleDevice device, String reason) {
+    connectionGeneration++;
+    hardResetBleStack();
+    device.connecting = false;
+    device.connected = false;
+    connectionState = ConnectionState.FAILED;
+    activeAddress = device.address;
+    bleDevice = null;
+    retryDevice = null;
+    retryAfterDisconnect = false;
+    replaceDeviceAtIndex(safeDeviceIndex(indexValue, device), device);
+    notifyAdapter();
+    Toast.makeText(context, "BLE 连接失败，请再次点击设备重试", Toast.LENGTH_LONG).show();
+    Logger.e("BLE connection failed after retry: " + reason);
+  }
+
+  private synchronized void hardResetBleStack() {
+    cancelConnectionTimers();
+    clearTransportState();
+    connectionGeneration++;
+    if (manager != null) manager.destroy();
+    initBleManager();
+  }
+
+  private synchronized boolean isActiveAttempt(long generation, String address) {
+    return isMatchingAttempt(generation, connectionGeneration, address, activeAddress);
+  }
+
+  static boolean isMatchingAttempt(
+      long callbackGeneration,
+      long currentGeneration,
+      String callbackAddress,
+      String activeAddress) {
+    return callbackGeneration == currentGeneration
+        && callbackAddress != null
+        && callbackAddress.equals(activeAddress);
+  }
+
+  static boolean shouldAutoRetry(int completedRetries) {
+    return completedRetries < MAX_AUTO_RETRIES;
+  }
+
+  private void cancelConnectionTimers() {
+    mainHandler.removeCallbacksAndMessages(null);
+  }
+
+  private void clearTransportState() {
+    writeQueue.clear();
+    clearSerialCharacteristics();
+    motionGeneration = 0L;
+    readValue = null;
+  }
+
+  private int safeDeviceIndex(int preferredIndex, BleDevice device) {
+    if (preferredIndex >= 0
+        && preferredIndex < deviceList.size()
+        && deviceList.get(preferredIndex).address.equals(device.address)) return preferredIndex;
+    for (int i = 0; i < deviceList.size(); i++) {
+      if (deviceList.get(i).address.equals(device.address)) return i;
+    }
+    deviceList.add(device);
+    return deviceList.size() - 1;
+  }
+
+  private void replaceDeviceAtIndex(int index, BleDevice device) {
+    if (index >= 0 && index < deviceList.size()) deviceList.set(index, device);
+    notifyAdapter();
+  }
+
+  private void logConnection(String event, long generation, BleDevice device, String details) {
+    String address = device == null ? "none" : device.address;
+    String message =
+        "event=" + event + ",generation=" + generation + ",address=" + address + "," + details;
+    Log.i("Bluetooth_Connection", message);
+    Logger.i(message);
+  }
+
+  public synchronized String getConnectionStatus(String address) {
+    if (address == null || activeAddress == null || !address.equals(activeAddress)) return "连接";
+    switch (connectionState) {
+      case CONNECTING:
+        return "连接中";
+      case ENABLING_NOTIFY:
+        return "初始化串口";
+      case SERIAL_READY:
+        return "断开";
+      case RETRYING:
+        return "自动重试";
+      case DISCONNECTING:
+        return "断开中";
+      case FAILED:
+        return "连接失败";
+      case DISCONNECTED:
+      default:
+        return "连接";
+    }
+  }
+
+  public synchronized ConnectionState getConnectionState() {
+    return connectionState;
+  }
+
+  public synchronized String getLastConnectionError() {
+    return lastConnectionError;
+  }
 
   public boolean isBleConnected() {
     return bleDevice != null && bleDevice.connected;
   }
 
   public boolean isSerialReady() {
-    return isBleConnected()
+    return connectionState == ConnectionState.SERIAL_READY
+        && isBleConnected()
         && writeServiceInfo != null
         && writeCharacteristic != null
         && notifyServiceInfo != null

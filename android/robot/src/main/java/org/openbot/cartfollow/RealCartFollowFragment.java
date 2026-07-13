@@ -101,7 +101,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
           vehicle.emergencyStop();
           binding.startSwitch.setChecked(false);
           binding.startSwitch.setEnabled(false);
-          stateMachine.cancel();
+          resetFollowSession();
           refreshRealUi();
         });
     setMode(RealCartSafetyController.Mode.MANUAL);
@@ -125,8 +125,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
     if (binding != null) {
       binding.startSwitch.setChecked(false);
       binding.startSwitch.setEnabled(false);
+      resetFollowSession();
     }
-    stateMachine.cancel();
   }
 
   @Override
@@ -162,6 +162,13 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   }
 
   @Override
+  protected void onInferenceFailure(RuntimeException error) {
+    latestOutput = safetyController.resetAutoDrive("inference_failure", true);
+    sendOutput(latestOutput);
+    finishAutoSession("inference_failure", true);
+  }
+
+  @Override
   protected SystemSafetyEvidence createSystemSafetyEvidence() {
     boolean communicationReady = vehicle != null && vehicle.isCartFirmwareReady();
     return new SystemSafetyEvidence(
@@ -179,8 +186,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   private void setMode(RealCartSafetyController.Mode mode) {
     invalidateManualControl("mode_change", true);
     safetyController.setMode(mode);
-    stateMachine.cancel();
     binding.startSwitch.setChecked(false);
+    resetFollowSession();
     boolean auto = mode == RealCartSafetyController.Mode.AUTO;
     binding.manualDriveControls.setVisibility(auto ? View.GONE : View.VISIBLE);
     binding.unlockAuto.setVisibility(auto ? View.VISIBLE : View.GONE);
@@ -362,12 +369,16 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   }
 
   private void finishAutoSession(String reason, boolean revokeUnlock) {
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+      mainHandler.post(() -> finishAutoSession(reason, revokeUnlock));
+      return;
+    }
     if (binding == null || safetyController.getMode() != RealCartSafetyController.Mode.AUTO) return;
     latestOutput = safetyController.resetAutoDrive(reason, revokeUnlock);
     sendOutput(latestOutput);
     if (binding.startSwitch.isChecked()) binding.startSwitch.setChecked(false);
     binding.startSwitch.setEnabled(false);
-    stateMachine.cancel();
+    resetFollowSession();
     refreshRealUi();
   }
 

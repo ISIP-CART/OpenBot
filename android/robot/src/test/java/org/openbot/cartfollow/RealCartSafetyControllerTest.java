@@ -46,15 +46,14 @@ public class RealCartSafetyControllerTest {
   }
 
   @Test
-  public void unlockDoesNotStartInferenceWatchdogUntilStartIsEnabled() {
+  public void stationaryAutoSessionDoesNotTriggerInferenceWatchdog() {
     RealCartSafetyController controller = readyAutoController();
     assertTrue(controller.unlockAuto());
     assertNull(controller.watchdog(10_000L));
 
     controller.setAutoRunEnabled(true, 10_000L);
     assertNull(controller.watchdog(10_000L + RealCartSafetyController.INFERENCE_TIMEOUT_MS));
-    assertNotNull(
-        controller.watchdog(10_000L + RealCartSafetyController.INFERENCE_TIMEOUT_MS + 1L));
+    assertNull(controller.watchdog(60_000L));
   }
 
   @Test
@@ -78,13 +77,36 @@ public class RealCartSafetyControllerTest {
     RealCartSafetyController controller = readyAutoController();
     assertTrue(controller.unlockAuto());
     controller.setAutoRunEnabled(true, 900L);
-    controller.auto(frame(new Control(0.4f, 0.4f), BehaviorAction.FOLLOW_SLOW), 1000L);
+    FollowStateMachine.FrameResult movingFrame =
+        frame(new Control(0.4f, 0.4f), BehaviorAction.FOLLOW_SLOW);
+    controller.auto(movingFrame, 1000L);
+    controller.auto(movingFrame, 1030L);
+    controller.auto(movingFrame, 1060L);
 
     RealCartSafetyController.Output output =
-        controller.watchdog(1000L + RealCartSafetyController.INFERENCE_TIMEOUT_MS + 1L);
+        controller.watchdog(1060L + RealCartSafetyController.INFERENCE_TIMEOUT_MS + 1L);
     assertNotNull(output);
     assertTrue(output.isStop());
     assertFalse(controller.isAutoUnlocked());
+  }
+
+  @Test
+  public void stoppedAutoOutputDisarmsInferenceWatchdog() {
+    RealCartSafetyController controller = readyAutoController();
+    assertTrue(controller.unlockAuto());
+    controller.setAutoRunEnabled(true, 900L);
+    FollowStateMachine.FrameResult movingFrame =
+        frame(new Control(0.4f, 0.4f), BehaviorAction.FOLLOW_SLOW);
+    controller.auto(movingFrame, 1000L);
+    controller.auto(movingFrame, 1030L);
+    controller.auto(movingFrame, 1060L);
+
+    FollowStateMachine.FrameResult stoppedFrame =
+        frame(new Control(0f, 0f), BehaviorAction.MOTION_STOP);
+    controller.auto(stoppedFrame, 1090L);
+
+    assertNull(controller.watchdog(10_000L));
+    assertTrue(controller.isAutoUnlocked());
   }
 
   @Test

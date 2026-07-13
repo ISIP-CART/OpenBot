@@ -1246,3 +1246,41 @@ Logcat 明确显示 `BaseCartFollowFragment.processFrame()` 使用空的 `croppe
 坐标变换。任一对象缺失时先重新配置检测器，仍未成功则跳过该帧，不再进入推理线程。
 推理任务同时捕获当帧使用的检测器、位图和坐标变换快照，避免生命周期字段变化影响
 已经排队的任务。
+
+### 20.6 拍照确认与 BLE 半连接修复
+
+真机继续测试发现，Start 打开后虽然可以完成 15 帧目标采集并显示拍照确认面板，但
+400 ms 推理 watchdog 在静止采集和等待确认阶段仍会运行。当某帧检测或 ReID 超过
+400 ms 时，真实车页面会关闭 Start 并取消状态机，却没有同步隐藏旧确认面板，造成
+“照片仍在、确认按钮无反应”的假窗口。
+
+现将 watchdog 改为只保护最近一次自动输出为非零的运动阶段。采集目标、等待确认、
+重新识别、倒计时和等待居中时车辆输出均为零，可以等待用户操作；一旦车辆已收到
+非零命令，超过 400 ms 没有新推理结果仍会立即停车并撤销解锁。所有自动结束路径
+统一重置 Start、确认面板、倒计时、ReID、track/belief、诊断会话和状态机。确认与
+重拍按钮也会校验当前确实处于 `LOCKED_PENDING_CONFIRM`，过期窗口不能锁定目标。
+
+BLE 侧确认 EasyBLE 2.0.2 存在 MTU 失败后不回调失败的路径。旧实现只有 MTU 64
+成功后才订阅 Notify，因此会永久停在半连接状态，只能通过重启 App 重建 BLE 栈。
+当前控制、心跳及 `f/r` 握手报文均适配默认 MTU，现改为服务发现后直接订阅 Notify，
+并加入：
+
+- 3 秒 Notify 初始化超时；
+- 每次连接独立 generation，忽略旧连接回调；
+- 失败后完整断开并等待 750 ms，自动重试一次；
+- 第二次失败后销毁并重新初始化 EasyBLE GATT 栈，允许再次点击连接；
+- 主动断开不自动重连；
+- BLE 列表显示“连接中 / 初始化串口 / 自动重试 / 连接失败”等中文状态。
+
+BLE 生命周期使用 `Bluetooth_Connection` 标签持续记录低频状态；控制与写队列明细仍
+由“记录日志”开关控制，默认关闭。
+
+本轮实际验证结果：
+
+```text
+全部 Debug 单元测试             41/41
+FollowSessionGuard Robolectric  2/2
+:robot:check                    通过
+:robot:assembleDebug            通过
+Debug APK                       android/robot/build/outputs/apk/debug/robot-debug.apk
+```
