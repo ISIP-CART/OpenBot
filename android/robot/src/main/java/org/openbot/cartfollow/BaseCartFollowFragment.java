@@ -222,6 +222,7 @@ public class BaseCartFollowFragment extends CameraFragment {
             resetRecoveryRelock();
             startDiagnosticSession();
             stateMachine.startCapture();
+            onFollowEnabledChanged(true);
           } else {
             binding.modelSpinner.setEnabled(true);
             if (reidCoordinator != null) reidCoordinator.reset();
@@ -231,6 +232,7 @@ public class BaseCartFollowFragment extends CameraFragment {
             stopDiagnosticSession();
             stateMachine.cancel();
             resetUiToIdle();
+            onFollowEnabledChanged(false);
           }
         });
     onCartFollowViewCreated();
@@ -238,6 +240,9 @@ public class BaseCartFollowFragment extends CameraFragment {
 
   /** Hook for concrete screens to install controls without duplicating the perception pipeline. */
   protected void onCartFollowViewCreated() {}
+
+  /** Lets real hardware screens stop synchronously when the shared Start switch changes. */
+  protected void onFollowEnabledChanged(boolean enabled) {}
 
   private void resetUiToIdle() {
     updateCommandText(getString(R.string.cart_sim_idle));

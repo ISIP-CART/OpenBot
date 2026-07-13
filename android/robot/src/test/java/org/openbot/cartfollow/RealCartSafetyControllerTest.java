@@ -16,16 +16,14 @@ public class RealCartSafetyControllerTest {
     assertTrue(
         controller
             .manual(
-                RealCartSafetyController.MANUAL_FORWARD,
-                RealCartSafetyController.MANUAL_FORWARD)
+                RealCartSafetyController.MANUAL_FORWARD, RealCartSafetyController.MANUAL_FORWARD)
             .isStop());
 
     controller.setForeground(true);
     controller.setConnection(true, true);
     RealCartSafetyController.Output output =
         controller.manual(
-            RealCartSafetyController.MANUAL_FORWARD,
-            RealCartSafetyController.MANUAL_FORWARD);
+            RealCartSafetyController.MANUAL_FORWARD, RealCartSafetyController.MANUAL_FORWARD);
     assertEquals(14, output.left);
     assertEquals(14, output.right);
   }
@@ -36,7 +34,6 @@ public class RealCartSafetyControllerTest {
     assertEquals(12, RealCartSafetyController.MANUAL_REVERSE);
     assertEquals(5, RealCartSafetyController.MANUAL_TURN);
     assertEquals(14, RealCartSafetyController.AUTO_MAX);
-    assertEquals(5, RealCartSafetyController.SEARCH_SPEED);
   }
 
   @Test
@@ -48,15 +45,18 @@ public class RealCartSafetyControllerTest {
   }
 
   @Test
-  public void autoOutputPreservesRatioAndLimit() {
+  public void autoOutputUsesBoundedRealCartCommands() {
     RealCartSafetyController controller = readyAutoController();
     assertTrue(controller.unlockAuto());
     FollowStateMachine.FrameResult frame =
-        frame(new Control(0.6f, 0.3f), BehaviorAction.FOLLOW_SLOW);
+        frame(new Control(0.6f, 0.6f), BehaviorAction.FOLLOW_SLOW);
+    frame.distanceEstimate = distance(0.75f, DistanceState.TOO_FAR);
 
-    RealCartSafetyController.Output output = controller.auto(frame, 1000L);
-    assertEquals(Math.round(0.6f * RealCartSafetyController.AUTO_MAX), output.left);
-    assertEquals(Math.round(0.3f * RealCartSafetyController.AUTO_MAX), output.right);
+    controller.auto(frame, 1000L);
+    controller.auto(frame, 1030L);
+    RealCartSafetyController.Output output = controller.auto(frame, 1060L);
+    assertEquals(14, output.left);
+    assertEquals(14, output.right);
   }
 
   @Test
@@ -73,15 +73,15 @@ public class RealCartSafetyControllerTest {
   }
 
   @Test
-  public void searchStopsAfterTwoSeconds() {
+  public void searchNeverMovesAndRevokesAfterTwoSeconds() {
     RealCartSafetyController controller = readyAutoController();
     assertTrue(controller.unlockAuto());
     FollowStateMachine.FrameResult frame =
         frame(new Control(0f, 0f), BehaviorAction.LOCAL_SEARCH_LEFT);
-    assertFalse(controller.auto(frame, 1000L).isStop());
+    assertTrue(controller.auto(frame, 1000L).isStop());
 
     RealCartSafetyController.Output output =
-        controller.auto(frame, 1000L + RealCartSafetyController.SEARCH_LIMIT_MS + 1L);
+        controller.auto(frame, 1000L + RealCartAutoDriveController.RECOVERY_LIMIT_MS);
     assertTrue(output.isStop());
     assertFalse(controller.isAutoUnlocked());
   }
@@ -117,6 +117,13 @@ public class RealCartSafetyControllerTest {
             -1);
     frame.behaviorDecision =
         new BehaviorDecisionResult(FollowState.FOLLOW, action, "test", null, 1f);
+    frame.distanceEstimate = distance(0.75f, DistanceState.TOO_FAR);
     return frame;
+  }
+
+  private static ImageSetpointDistanceEstimator.DistanceEstimate distance(
+      float heightScale, DistanceState state) {
+    return new ImageSetpointDistanceEstimator.DistanceEstimate(
+        heightScale, heightScale, 0f, state, 1f, null);
   }
 }
