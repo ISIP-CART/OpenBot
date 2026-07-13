@@ -3,6 +3,7 @@ package org.openbot.cartfollow;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.Collections;
@@ -45,9 +46,22 @@ public class RealCartSafetyControllerTest {
   }
 
   @Test
+  public void unlockDoesNotStartInferenceWatchdogUntilStartIsEnabled() {
+    RealCartSafetyController controller = readyAutoController();
+    assertTrue(controller.unlockAuto());
+    assertNull(controller.watchdog(10_000L));
+
+    controller.setAutoRunEnabled(true, 10_000L);
+    assertNull(controller.watchdog(10_000L + RealCartSafetyController.INFERENCE_TIMEOUT_MS));
+    assertNotNull(
+        controller.watchdog(10_000L + RealCartSafetyController.INFERENCE_TIMEOUT_MS + 1L));
+  }
+
+  @Test
   public void autoOutputUsesBoundedRealCartCommands() {
     RealCartSafetyController controller = readyAutoController();
     assertTrue(controller.unlockAuto());
+    controller.setAutoRunEnabled(true, 900L);
     FollowStateMachine.FrameResult frame =
         frame(new Control(0.6f, 0.6f), BehaviorAction.FOLLOW_SLOW);
     frame.distanceEstimate = distance(0.75f, DistanceState.TOO_FAR);
@@ -63,6 +77,7 @@ public class RealCartSafetyControllerTest {
   public void staleInferenceStopsAndRevokesUnlock() {
     RealCartSafetyController controller = readyAutoController();
     assertTrue(controller.unlockAuto());
+    controller.setAutoRunEnabled(true, 900L);
     controller.auto(frame(new Control(0.4f, 0.4f), BehaviorAction.FOLLOW_SLOW), 1000L);
 
     RealCartSafetyController.Output output =
@@ -76,6 +91,7 @@ public class RealCartSafetyControllerTest {
   public void searchNeverMovesAndRevokesAfterTwoSeconds() {
     RealCartSafetyController controller = readyAutoController();
     assertTrue(controller.unlockAuto());
+    controller.setAutoRunEnabled(true, 900L);
     FollowStateMachine.FrameResult frame =
         frame(new Control(0f, 0f), BehaviorAction.LOCAL_SEARCH_LEFT);
     assertTrue(controller.auto(frame, 1000L).isStop());

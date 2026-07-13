@@ -1225,3 +1225,12 @@ RealCartAutoDriveControllerTest  5/5
 :robot:assembleDebug            通过
 Debug APK                       android/robot/build/outputs/apk/debug/robot-debug.apk
 ```
+
+### 20.4 自动解锁闪退修复
+
+首版真机测试发现：长按自动解锁后 Start 短暂亮起，随后立即变灰。根因是推理 watchdog
+在 Start 尚未打开、第一帧推理尚未产生时，就把 `lastInferenceMs=-1` 判为超时并撤销解锁。
+
+现改为区分“已解锁”和“Start 已启动”：仅长按解锁不会启动推理 watchdog；用户真正打开
+Start 后才从当前时刻开始 400 ms 首帧等待。自动运行开始后，超过 400 ms 没有新推理仍会
+停车并撤销解锁，原安全保护没有放宽。

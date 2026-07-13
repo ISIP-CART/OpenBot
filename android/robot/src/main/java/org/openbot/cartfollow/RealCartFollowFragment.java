@@ -136,7 +136,11 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
 
   @Override
   protected void onFollowEnabledChanged(boolean enabled) {
-    if (enabled) return;
+    if (enabled) {
+      safetyController.setAutoRunEnabled(true, SystemClock.elapsedRealtime());
+      refreshRealUi();
+      return;
+    }
     latestOutput = safetyController.resetAutoDrive("start_off", false);
     sendOutput(latestOutput);
     refreshRealUi();
