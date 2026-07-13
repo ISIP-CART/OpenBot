@@ -1,7 +1,5 @@
 package org.openbot.cartfollow;
 
-import org.openbot.vehicle.Control;
-
 /** Pure safety gate that converts UI or behavior decisions into bounded protocol commands. */
 public final class RealCartSafetyController {
   public enum Mode {
@@ -13,9 +11,7 @@ public final class RealCartSafetyController {
   public static final int MANUAL_REVERSE = 12;
   public static final int MANUAL_TURN = 5;
   public static final int AUTO_MAX = 14;
-  public static final int SEARCH_SPEED = 5;
   public static final long INFERENCE_TIMEOUT_MS = 400L;
-  public static final long SEARCH_LIMIT_MS = 2000L;
 
   public static final class Output {
     public final int left;
@@ -38,26 +34,40 @@ public final class RealCartSafetyController {
   private boolean connected;
   private boolean firmwareReady;
   private boolean autoUnlocked;
+  private boolean autoRunEnabled;
+  private boolean autoMotionActive;
   private boolean emergencyLatched;
   private long lastInferenceMs = -1L;
-  private long searchStartMs = -1L;
+  private final RealCartAutoDriveController autoDriveController = new RealCartAutoDriveController();
 
   public synchronized void setForeground(boolean foreground) {
     this.foreground = foreground;
-    if (!foreground) autoUnlocked = false;
+    if (!foreground) {
+      autoUnlocked = false;
+      autoRunEnabled = false;
+      autoMotionActive = false;
+      autoDriveController.reset("background");
+    }
   }
 
   public synchronized void setConnection(boolean connected, boolean firmwareReady) {
     this.connected = connected;
     this.firmwareReady = firmwareReady;
-    if (!connected || !firmwareReady) autoUnlocked = false;
+    if (!connected || !firmwareReady) {
+      autoUnlocked = false;
+      autoRunEnabled = false;
+      autoMotionActive = false;
+      autoDriveController.reset("ble_not_ready");
+    }
   }
 
   public synchronized void setMode(Mode mode) {
     this.mode = mode;
     autoUnlocked = false;
-    searchStartMs = -1L;
+    autoRunEnabled = false;
+    autoMotionActive = false;
     lastInferenceMs = -1L;
+    autoDriveController.reset("mode_change");
   }
 
   public synchronized Mode getMode() {
@@ -74,9 +84,19 @@ public final class RealCartSafetyController {
     return autoUnlocked;
   }
 
+  public synchronized void setAutoRunEnabled(boolean enabled, long nowMs) {
+    autoRunEnabled = enabled;
+    autoMotionActive = false;
+    lastInferenceMs = enabled ? nowMs : -1L;
+    autoDriveController.reset(enabled ? "start_arming" : "start_off");
+  }
+
   public synchronized void latchEmergency() {
     emergencyLatched = true;
     autoUnlocked = false;
+    autoRunEnabled = false;
+    autoMotionActive = false;
+    autoDriveController.reset("emergency_stop");
   }
 
   public synchronized boolean isEmergencyLatched() {
@@ -90,41 +110,33 @@ public final class RealCartSafetyController {
 
   public synchronized Output auto(FollowStateMachine.FrameResult frame, long nowMs) {
     lastInferenceMs = nowMs;
-    if (!canMove() || mode != Mode.AUTO || !autoUnlocked || frame == null) {
+    if (!canMove() || mode != Mode.AUTO || !autoUnlocked || !autoRunEnabled || frame == null) {
+      autoMotionActive = false;
       return stop("auto_blocked");
     }
 
     BehaviorDecisionResult decision = frame.behaviorDecision;
-    if (decision == null) return stop("decision_missing");
-
-    switch (decision.selectedAction) {
-      case FOLLOW_SLOW:
-        searchStartMs = -1L;
-        return scale(frame.control, AUTO_MAX, "follow_slow");
-      case FOLLOW_CAUTION:
-        searchStartMs = -1L;
-        return scale(frame.control, Math.round(AUTO_MAX * 0.65f), "follow_caution");
-      case LOCAL_SEARCH_LEFT:
-      case LOCAL_SEARCH_RIGHT:
-        if (searchStartMs < 0L) searchStartMs = nowMs;
-        if (nowMs - searchStartMs > SEARCH_LIMIT_MS) {
-          autoUnlocked = false;
-          return stop("search_timeout");
-        }
-        return decision.selectedAction == BehaviorAction.LOCAL_SEARCH_LEFT
-            ? new Output(-SEARCH_SPEED, SEARCH_SPEED, "search_left")
-            : new Output(SEARCH_SPEED, -SEARCH_SPEED, "search_right");
-      default:
-        searchStartMs = -1L;
-        return stop(decision.selectedAction.name().toLowerCase());
+    if (decision == null) {
+      autoMotionActive = false;
+      return stop("decision_missing");
     }
+    RealCartAutoDriveController.Result result = autoDriveController.update(frame, nowMs);
+    if (result.lockout) autoUnlocked = false;
+    if (result.lockout) autoRunEnabled = false;
+    autoMotionActive = result.left != 0 || result.right != 0;
+    return new Output(result.left, result.right, result.reason);
   }
 
   public synchronized Output watchdog(long nowMs) {
     if (mode == Mode.AUTO
         && autoUnlocked
-        && (lastInferenceMs < 0L || nowMs - lastInferenceMs > INFERENCE_TIMEOUT_MS)) {
+        && autoRunEnabled
+        && autoMotionActive
+        && nowMs - lastInferenceMs > INFERENCE_TIMEOUT_MS) {
       autoUnlocked = false;
+      autoRunEnabled = false;
+      autoMotionActive = false;
+      autoDriveController.reset("inference_timeout");
       return stop("inference_timeout");
     }
     return null;
@@ -134,13 +146,20 @@ public final class RealCartSafetyController {
     return new Output(0, 0, reason);
   }
 
-  private boolean canMove() {
-    return foreground && connected && firmwareReady && !emergencyLatched;
+  public synchronized Output resetAutoDrive(String reason, boolean revokeUnlock) {
+    if (revokeUnlock) autoUnlocked = false;
+    autoRunEnabled = false;
+    autoMotionActive = false;
+    autoDriveController.reset(reason);
+    lastInferenceMs = -1L;
+    return stop(reason);
   }
 
-  private static Output scale(Control control, int maxAbs, String reason) {
-    if (control == null) return stop("control_missing");
-    return new Output(
-        Math.round(control.getLeft() * maxAbs), Math.round(control.getRight() * maxAbs), reason);
+  public synchronized RealCartAutoDriveController.Result getAutoDriveResult() {
+    return autoDriveController.getLastResult();
+  }
+
+  private boolean canMove() {
+    return foreground && connected && firmwareReady && !emergencyLatched;
   }
 }

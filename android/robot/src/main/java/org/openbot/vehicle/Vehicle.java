@@ -579,6 +579,10 @@ public class Vehicle {
     return bluetoothManager == null ? "unavailable" : bluetoothManager.getWriteStatus();
   }
 
+  public String getBleConnectionStatus(String address) {
+    return bluetoothManager == null ? "连接" : bluetoothManager.getConnectionStatus(address);
+  }
+
   public void setBleControlDiagnosticsEnabled(boolean enabled) {
     if (bluetoothManager != null) bluetoothManager.setControlDiagnosticsEnabled(enabled);
   }

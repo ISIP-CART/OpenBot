@@ -3,7 +3,7 @@
 > 所属项目：自主跟随购物车原型
 > 代码位置：`dev/OpenBot/android/robot/src/main/java/org/openbot/cartfollow/`
 > 开发分支：`feature/human-cart-simulator`（Phase 1）/ `feature/distance-control`（Phase 2）/ `feature/person-crop-collector`（Phase 3 起）
-> 最后更新：2026-07-09
+> 最后更新：2026-07-13
 
 ---
 
@@ -178,8 +178,8 @@ ReID margin 可作为身份置信证据，但不能单独恢复 FOLLOW。
 
 | 功能 | 优先级 | 说明 |
 |------|--------|------|
-| **`vehicle.setControl()` 集成** | 中（阶段6） | 当前 Control 仅显示在 UI 上，未实际发送给底盘。硬件联调阶段在 `processFrame()` 中调用 `vehicle.setControl()` |
-| **目标轨迹与身份信念层** | 高 | ReID 已接入并能运行，但目标离开/返回和干扰者场景仍可能跟错或恢复过慢；下一阶段需要 `TargetTrackManager + IdentityBeliefAccumulator` |
+| **近场传感器安全门** | 高 | 超声波 / ToF 尚未接入，真实自动模式只能在空旷受控场地测试 |
+| **真实车急转弯与拐角恢复** | 中 | 首版只允许两轮同向缓弯，偏差过大时停车，不执行原地旋转搜索 |
 | **参数持久化** | 低 | 当前调参仅内存生效，重启恢复默认 |
 | **参数 UI 面板** | 低 | K_TURN / MAX_FORWARD / 阈值等参数需通过代码修改，没有 UI 界面 |
 | **bottomShift 参与判态** | 低 | 当前 bottomShift 仅用于显示，未参与距离状态判断。待 90° 旋转下方向实测验证后决定是否纳入 |
@@ -223,7 +223,7 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 | 上位机→下位机 | `c<left>,<right>` | 由 `Vehicle.sendControl()` 发送，范围 [-255,255] |
 | 心跳 | `h<interval_ms>` | 由 `Vehicle` 自动管理 |
 
-**当前状态：Cart Simulator 未调用 `vehicle.setControl()`，因此底盘不会运动。** 首版联调前需要先接通这个链路。
+**当前状态：** Human Cart Simulator 仍只显示模拟提示；独立的 Real Cart Follow 页面已经通过 `vehicle.setControl()` 接入 BLE 底盘，并在最终输出前增加真实车安全门和自动输出整形。
 
 ---
 
@@ -289,8 +289,10 @@ STOP ──(用户重新开始)──→ CAPTURE_TARGET
 
 ### Phase 8：硬件联调
 
-- [ ] 接通 `vehicle.setControl()` 到底盘
-- [ ] 真实车速/转向半径/延迟标定
+- [x] Real Cart Follow 通过 `vehicle.setControl()` 接通 BLE 底盘
+- [x] 手动低速、BLE 保鲜、换向停稳与急停完成首轮联调
+- [ ] 自动直行/同向差速缓弯真车验收
+- [ ] 更大转向半径和控制延迟标定
 - [ ] ToF / 超声波安全冗余
 
 ---
@@ -1167,3 +1169,149 @@ Debug APK        android/robot/build/outputs/apk/debug/robot-debug.apk
 
 自动化测试不能替代车轮悬空验收。若 Android 日志顺序正确，而 ESP32 `$spd` 或 AT8236
 `$MSPD` 仍显示四轮换向不同步，应转入下位机换向过零联锁和逐轮最低可靠速度测试。
+
+---
+
+## 20. 首版真实车自动跟随输出整形（2026-07-13）
+
+### 20.1 当前定位
+
+Real Cart Follow 已经复用 Human Cart Simulator 的检测、目标确认、ReID、track/belief、
+距离估计和行为仲裁。真车手动遥控基本验收后，首版自动模式不再直接缩放连续
+`Control`，而是在 BLE 输出前经过 `RealCartAutoDriveController`。
+
+该整形器只允许四种命令：
+
+```text
+直行       c14,14
+向左缓弯   c12,14
+向右缓弯   c14,12
+停车       c0,0
+```
+
+两轮始终同向且不倒车。首版不输出原地转向，也不把 `LOCAL_SEARCH_LEFT/RIGHT` 映射为
+运动，避免触发下位机原地转向约 `24..40` 的助推输出和长时间换向等待。
+
+### 20.2 运动准入与停车
+
+- 停车状态下，只有可信 `FOLLOW + FOLLOW_SLOW`、`heightScale <= 0.80` 且目标连续 3 帧
+  居中时才允许从 `c0,0` 起步。
+- 横向控制使用 `alpha=0.25` 的 EMA；滤波转向量不超过 `0.15` 时直行，`0.15..0.45`
+  时同向差速缓弯，超过 `0.45` 时停车。
+- 直行与缓弯切换不插入 `c0,0`，避免不必要地触发下位机停稳保护。
+- 距离 `OK / TOO_CLOSE / UNKNOWN`、身份谨慎或不确定、中心受阻、系统安全门失败均停车。
+- `IDENTITY_UNCERTAIN / LOST / SEARCH` 只允许静止重捕；2 秒内未恢复则撤销自动解锁，
+  关闭 Start，并要求重新采集和确认目标。
+- Start 关闭、页面失焦/暂停、BLE 断开、握手丢失、推理超过 400 ms 和急停都会立即
+  将最后输出替换为 `c0,0`。
+
+### 20.3 诊断与验证
+
+真实页面新增 `LOCKED / WAIT_TARGET / WAIT_CENTER / MOVING_STRAIGHT / CURVE_LEFT /
+CURVE_RIGHT / RECOVERY_STOP` 状态显示。打开“记录日志”后，`CartControl` 每次状态变化或
+每 250 ms 记录原始 turn、滤波 turn、heightScale、行为动作、整形输出和拒绝原因；
+默认关闭时不增加日志负担。
+
+本轮自动化验证应包含 `RealCartAutoDriveControllerTest`，并继续运行全部 robot 单元测试、
+Android lint/check 和 `assembleDebug`。自动跟随只能按“车轮悬空 -> 空旷直线 -> 人物缓慢
+横移缓弯”的顺序验收，超声波/ToF 接入前不得进入货架、拥挤区域或无人看护测试。
+
+本轮实际验证结果：
+
+```text
+RealCartAutoDriveControllerTest  5/5
+全部 Debug 单元测试             35/35
+:robot:check                    通过
+:robot:assembleDebug            通过
+Debug APK                       android/robot/build/outputs/apk/debug/robot-debug.apk
+```
+
+### 20.4 自动解锁闪退修复
+
+首版真机测试发现：长按自动解锁后 Start 短暂亮起，随后立即变灰。根因是推理 watchdog
+在 Start 尚未打开、第一帧推理尚未产生时，就把 `lastInferenceMs=-1` 判为超时并撤销解锁。
+
+现改为区分“已解锁”和“Start 已启动”：仅长按解锁不会启动推理 watchdog；用户真正打开
+Start 后才从当前时刻开始 400 ms 首帧等待。自动运行开始后，超过 400 ms 没有新推理仍会
+停车并撤销解锁，原安全保护没有放宽。
+
+### 20.5 Start 后推理线程闪退修复
+
+真机连接后再次测试发现：Start 可以正常打开，但第一帧人物检测会在 inference 线程闪退。
+Logcat 明确显示 `BaseCartFollowFragment.processFrame()` 使用空的 `croppedBitmap` 创建
+`Canvas`。根因是页面进入后台时检测器被保留，恢复页面时却只清空了裁剪位图；后续代码
+看到检测器仍存在便跳过初始化，形成“检测器有效、推理缓冲区为空”的不一致状态。
+
+现改为页面恢复时保留匹配检测器的推理缓冲区，并在每帧推理前同时检查裁剪位图及正反
+坐标变换。任一对象缺失时先重新配置检测器，仍未成功则跳过该帧，不再进入推理线程。
+推理任务同时捕获当帧使用的检测器、位图和坐标变换快照，避免生命周期字段变化影响
+已经排队的任务。
+
+### 20.6 拍照确认与 BLE 半连接修复
+
+真机继续测试发现，Start 打开后虽然可以完成 15 帧目标采集并显示拍照确认面板，但
+400 ms 推理 watchdog 在静止采集和等待确认阶段仍会运行。当某帧检测或 ReID 超过
+400 ms 时，真实车页面会关闭 Start 并取消状态机，却没有同步隐藏旧确认面板，造成
+“照片仍在、确认按钮无反应”的假窗口。
+
+现将 watchdog 改为只保护最近一次自动输出为非零的运动阶段。采集目标、等待确认、
+重新识别、倒计时和等待居中时车辆输出均为零，可以等待用户操作；一旦车辆已收到
+非零命令，超过 400 ms 没有新推理结果仍会立即停车并撤销解锁。所有自动结束路径
+统一重置 Start、确认面板、倒计时、ReID、track/belief、诊断会话和状态机。确认与
+重拍按钮也会校验当前确实处于 `LOCKED_PENDING_CONFIRM`，过期窗口不能锁定目标。
+
+BLE 侧确认 EasyBLE 2.0.2 存在 MTU 失败后不回调失败的路径。旧实现只有 MTU 64
+成功后才订阅 Notify，因此会永久停在半连接状态，只能通过重启 App 重建 BLE 栈。
+当前控制、心跳及 `f/r` 握手报文均适配默认 MTU，现改为服务发现后直接订阅 Notify，
+并加入：
+
+- 3 秒 Notify 初始化超时；
+- 每次连接独立 generation，忽略旧连接回调；
+- 失败后完整断开并等待 750 ms，自动重试一次；
+- 第二次失败后销毁并重新初始化 EasyBLE GATT 栈，允许再次点击连接；
+- 主动断开不自动重连；
+- BLE 列表显示“连接中 / 初始化串口 / 自动重试 / 连接失败”等中文状态。
+
+BLE 生命周期使用 `Bluetooth_Connection` 标签持续记录低频状态；控制与写队列明细仍
+由“记录日志”开关控制，默认关闭。
+
+本轮实际验证结果：
+
+```text
+全部 Debug 单元测试             41/41
+FollowSessionGuard Robolectric  2/2
+:robot:check                    通过
+:robot:assembleDebug            通过
+Debug APK                       android/robot/build/outputs/apk/debug/robot-debug.apk
+```
+
+### 20.7 可见人物重捕与静止缓弯修复
+
+悬空自动跟随测试又发现两个容易混淆的现象：Start 关闭后最后一帧绿框仍停在画面上；
+视觉层显示“左转 / 右转”时，真实车轮速仍可能是 `c0,0`。前者是会话清理没有清空
+Overlay，后者是公共视觉建议与真实车安全整形输出使用了不同口径。
+
+真实车现改为：
+
+- 身份不确定但画面仍检测到人物时，持续输出 `c0,0` 并保持 Start，继续 ReID 和轨迹重捕；
+- 只有连续 2 秒完全检测不到人物时，才以 `target_missing_timeout` 结束会话；
+- 会话结束时同步清空检测框、目标标签和最后一帧绘制状态；
+- 停车状态下，可信目标连续 3 帧处于可缓弯范围后可直接输出 `c12,14` 或 `c14,12`；
+- 横向偏差超过 `0.45` 时仍停车，不开放倒车或原地转向；
+- 主提示改为真实输出对应的“直行 / 左缓弯 / 右缓弯 / 停车等待 / 停车重捕”，
+  公共视觉建议只保留在详细诊断中；
+- 页面保留 `last_end`，并用始终开启的 `CartFollow_Session` 低频日志记录 Start 和结束原因。
+
+Human Cart Simulator 的 18 秒身份不确定/搜索窗口不变；只有真实车实例关闭共享终态计时，
+由连续无人 2 秒的安全门负责结束自动会话。
+
+本轮实际验证结果：
+
+```text
+RealCartAutoDriveControllerTest  7/7
+FollowSessionGuardTest          3/3
+全部 Debug 单元测试             45/45
+:robot:check                    通过
+:robot:assembleDebug            通过
+Debug APK                       android/robot/build/outputs/apk/debug/robot-debug.apk
+```

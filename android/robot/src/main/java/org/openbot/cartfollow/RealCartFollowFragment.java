@@ -14,9 +14,11 @@ import org.openbot.vehicle.Control;
 /** Camera-based cart following with BLE manual control and guarded experimental autonomy. */
 public class RealCartFollowFragment extends BaseCartFollowFragment {
   private static final String CONTROL_LOG_TAG = "CartControl";
+  private static final String SESSION_LOG_TAG = "CartFollow_Session";
   private static final long COMMAND_REPEAT_MS = 100L;
   private static final long HANDSHAKE_RETRY_MS = 500L;
   private static final long AUTO_UNLOCK_HOLD_MS = 2000L;
+  private static final long AUTO_LOG_INTERVAL_MS = 250L;
 
   private final RealCartSafetyController safetyController = new RealCartSafetyController();
   private final ManualTouchRouter manualTouchRouter =
@@ -26,7 +28,10 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
       RealCartSafetyController.stop("idle");
   private boolean schedulerRunning;
   private long lastHandshakeRequestMs;
+  private long lastAutoLogMs;
+  private RealCartAutoDriveController.Phase lastLoggedAutoPhase;
   private View activeManualButton;
+  private String lastSessionEndReason = "none";
 
   private final Runnable commandScheduler =
       new Runnable() {
@@ -42,7 +47,10 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
             lastHandshakeRequestMs = now;
           }
           RealCartSafetyController.Output watchdog = safetyController.watchdog(now);
-          if (watchdog != null) latestOutput = watchdog;
+          if (watchdog != null) {
+            latestOutput = watchdog;
+            finishAutoSession("inference_timeout", false);
+          }
           if (safetyController.getMode() == RealCartSafetyController.Mode.MANUAL
               && manualTouchRouter.getActiveControl() == null) {
             latestOutput = RealCartSafetyController.stop("manual_idle");
@@ -55,6 +63,10 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
 
   @Override
   protected void onCartFollowViewCreated() {
+    // The real cart owns its missing-person timeout. Visible people keep a stationary ReID session
+    // alive, while two seconds with no person ends it in RealCartAutoDriveController.
+    stateMachine.IDENTITY_UNCERTAIN_TIMEOUT_MS = Long.MAX_VALUE;
+    stateMachine.SEARCH_TIMEOUT_MS = Long.MAX_VALUE;
     vehicle.useBluetoothConnection();
     binding.realControlPanel.setVisibility(View.VISIBLE);
     binding.realModeGroup.check(R.id.real_mode_manual);
@@ -80,20 +92,24 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
         .getViewTreeObserver()
         .addOnWindowFocusChangeListener(
             hasFocus -> {
-              if (!hasFocus
-                  && binding != null
-                  && safetyController.getMode() == RealCartSafetyController.Mode.MANUAL) {
-                invalidateManualControl("window_focus_lost", true);
+              if (!hasFocus && binding != null) {
+                if (safetyController.getMode() == RealCartSafetyController.Mode.MANUAL) {
+                  invalidateManualControl("window_focus_lost", true);
+                } else {
+                  finishAutoSession("window_focus_lost", true);
+                }
               }
             });
     binding.emergencyStop.setOnClickListener(
         v -> {
+          lastSessionEndReason = "emergency_stop";
+          logSession("end", lastSessionEndReason);
           safetyController.latchEmergency();
           invalidateManualControl("emergency_stop", true);
           vehicle.emergencyStop();
           binding.startSwitch.setChecked(false);
           binding.startSwitch.setEnabled(false);
-          stateMachine.cancel();
+          resetFollowSession();
           refreshRealUi();
         });
     setMode(RealCartSafetyController.Mode.MANUAL);
@@ -109,6 +125,12 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
 
   @Override
   protected void onCartFollowPause() {
+    if (binding != null
+        && safetyController.getMode() == RealCartSafetyController.Mode.AUTO
+        && binding.startSwitch.isChecked()) {
+      lastSessionEndReason = "paused";
+      logSession("end", lastSessionEndReason);
+    }
     safetyController.setForeground(false);
     invalidateManualControl("paused", true);
     vehicle.stopHeartbeat();
@@ -117,13 +139,29 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
     if (binding != null) {
       binding.startSwitch.setChecked(false);
       binding.startSwitch.setEnabled(false);
+      resetFollowSession();
     }
-    stateMachine.cancel();
   }
 
   @Override
   protected void onDiagnosticLoggingChanged(boolean enabled) {
     if (vehicle != null) vehicle.setBleControlDiagnosticsEnabled(enabled);
+  }
+
+  @Override
+  protected void onFollowEnabledChanged(boolean enabled) {
+    if (enabled) {
+      lastSessionEndReason = "none";
+      logSession("start", "enabled");
+      safetyController.setAutoRunEnabled(true, SystemClock.elapsedRealtime());
+      refreshRealUi();
+      return;
+    }
+    latestOutput = safetyController.resetAutoDrive("start_off", false);
+    lastSessionEndReason = "user_start_off";
+    logSession("end", lastSessionEndReason);
+    sendOutput(latestOutput);
+    refreshRealUi();
   }
 
   @Override
@@ -136,6 +174,17 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   @Override
   protected void onFollowFrame(FollowStateMachine.FrameResult frameResult) {
     latestOutput = safetyController.auto(frameResult, SystemClock.elapsedRealtime());
+    logAutoDecision(frameResult);
+    RealCartAutoDriveController.Result autoResult = safetyController.getAutoDriveResult();
+    updateCommandText(commandForAutoResult(autoResult));
+    if (autoResult.lockout) finishAutoSession(autoResult.reason, false);
+  }
+
+  @Override
+  protected void onInferenceFailure(RuntimeException error) {
+    latestOutput = safetyController.resetAutoDrive("inference_failure", true);
+    sendOutput(latestOutput);
+    finishAutoSession("inference_failure", true);
   }
 
   @Override
@@ -156,8 +205,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   private void setMode(RealCartSafetyController.Mode mode) {
     invalidateManualControl("mode_change", true);
     safetyController.setMode(mode);
-    stateMachine.cancel();
     binding.startSwitch.setChecked(false);
+    resetFollowSession();
     boolean auto = mode == RealCartSafetyController.Mode.AUTO;
     binding.manualDriveControls.setVisibility(auto ? View.GONE : View.VISIBLE);
     binding.unlockAuto.setVisibility(auto ? View.VISIBLE : View.GONE);
@@ -210,7 +259,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
         return true;
       case MotionEvent.ACTION_CANCEL:
       case MotionEvent.ACTION_OUTSIDE:
-        logTouch("cancel", manualTouchRouter.getActivePointerId(), manualTouchRouter.getActiveControl());
+        logTouch(
+            "cancel", manualTouchRouter.getActivePointerId(), manualTouchRouter.getActiveControl());
         invalidateManualControl("manual_cancel", true);
         return true;
       default:
@@ -251,12 +301,10 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
     switch (control) {
       case FORWARD:
         return safetyController.manual(
-            RealCartSafetyController.MANUAL_FORWARD,
-            RealCartSafetyController.MANUAL_FORWARD);
+            RealCartSafetyController.MANUAL_FORWARD, RealCartSafetyController.MANUAL_FORWARD);
       case BACKWARD:
         return safetyController.manual(
-            -RealCartSafetyController.MANUAL_REVERSE,
-            -RealCartSafetyController.MANUAL_REVERSE);
+            -RealCartSafetyController.MANUAL_REVERSE, -RealCartSafetyController.MANUAL_REVERSE);
       case LEFT:
         return safetyController.manual(
             -RealCartSafetyController.MANUAL_TURN, RealCartSafetyController.MANUAL_TURN);
@@ -332,7 +380,27 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
     safetyController.setConnection(serialReady, firmwareReady);
     if (!firmwareReady) {
       invalidateManualControl("ble_not_ready", false);
+      if (safetyController.getMode() == RealCartSafetyController.Mode.AUTO
+          && binding.startSwitch.isChecked()) {
+        finishAutoSession("ble_not_ready", false);
+      }
     }
+  }
+
+  private void finishAutoSession(String reason, boolean revokeUnlock) {
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+      mainHandler.post(() -> finishAutoSession(reason, revokeUnlock));
+      return;
+    }
+    if (binding == null || safetyController.getMode() != RealCartSafetyController.Mode.AUTO) return;
+    lastSessionEndReason = reason;
+    logSession("end", reason);
+    latestOutput = safetyController.resetAutoDrive(reason, revokeUnlock);
+    sendOutput(latestOutput);
+    if (binding.startSwitch.isChecked()) binding.startSwitch.setChecked(false);
+    binding.startSwitch.setEnabled(false);
+    resetFollowSession();
+    refreshRealUi();
   }
 
   private void invalidateManualControl(String reason, boolean sendStop) {
@@ -371,8 +439,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
         generation);
   }
 
-  private void logTouch(
-      String event, int pointerId, ManualControlArbiter.Control control) {
+  private void logTouch(String event, int pointerId, ManualControlArbiter.Control control) {
     logControl(
         "touch_" + event,
         "pointer="
@@ -386,8 +453,72 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
   private void logControl(String event, String details) {
     if (!isDiagnosticLoggingEnabled()) return;
     Log.i(
-        CONTROL_LOG_TAG,
-        "ms=" + SystemClock.elapsedRealtime() + ",event=" + event + "," + details);
+        CONTROL_LOG_TAG, "ms=" + SystemClock.elapsedRealtime() + ",event=" + event + "," + details);
+  }
+
+  private void logSession(String event, String reason) {
+    Log.i(
+        SESSION_LOG_TAG,
+        "ms="
+            + SystemClock.elapsedRealtime()
+            + ",event="
+            + event
+            + ",reason="
+            + reason);
+  }
+
+  static String commandForAutoResult(RealCartAutoDriveController.Result result) {
+    if (result == null) return "自动控制未就绪";
+    switch (result.phase) {
+      case MOVING_STRAIGHT:
+        return "小车直行";
+      case CURVE_LEFT:
+        return "小车左缓弯";
+      case CURVE_RIGHT:
+        return "小车右缓弯";
+      case WAIT_CENTER:
+        return "目标偏差过大，停车等待";
+      case RECOVERY_STOP:
+        return "身份确认中，停车重捕";
+      case WAIT_TARGET:
+        return "等待有效目标，保持停车";
+      case LOCKED:
+      default:
+        return "自动控制已锁定";
+    }
+  }
+
+  private void logAutoDecision(FollowStateMachine.FrameResult frame) {
+    if (!isDiagnosticLoggingEnabled()) return;
+    long now = SystemClock.elapsedRealtime();
+    RealCartAutoDriveController.Result result = safetyController.getAutoDriveResult();
+    if (result == null) return;
+    boolean phaseChanged = result.phase != lastLoggedAutoPhase;
+    if (!phaseChanged && now - lastAutoLogMs < AUTO_LOG_INTERVAL_MS) return;
+    lastAutoLogMs = now;
+    lastLoggedAutoPhase = result.phase;
+    String action =
+        frame == null || frame.behaviorDecision == null
+            ? "NONE"
+            : frame.behaviorDecision.selectedAction.name();
+    logControl(
+        "auto_decision",
+        "phase="
+            + result.phase
+            + ",action="
+            + action
+            + ",raw_turn="
+            + result.rawTurn
+            + ",filtered_turn="
+            + result.filteredTurn
+            + ",height_scale="
+            + result.heightScale
+            + ",output="
+            + result.left
+            + ","
+            + result.right
+            + ",reason="
+            + result.reason);
   }
 
   private static String directionName(ManualControlArbiter.Control control) {
@@ -406,6 +537,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
                       : vehicle.isBleSerialReady() ? "BLE 已连接 · 等待固件握手" : "BLE 未连接";
               String output =
                   latestOutput == null ? "0,0" : latestOutput.left + "," + latestOutput.right;
+              RealCartAutoDriveController.Result autoResult = safetyController.getAutoDriveResult();
               ManualControlArbiter.Control active = manualTouchRouter.getActiveControl();
               binding.realConnectionStatus.setText(
                   connection
@@ -415,6 +547,18 @@ public class RealCartFollowFragment extends BaseCartFollowFragment {
                       + (active == null ? "STOP" : active.name())
                       + " | ble="
                       + vehicle.getBleWriteStatus()
+                      + (safetyController.getMode() == RealCartSafetyController.Mode.AUTO
+                          ? " | auto="
+                              + autoResult.phase
+                              + " h="
+                              + String.format(java.util.Locale.US, "%.2f", autoResult.heightScale)
+                              + " turn="
+                              + String.format(java.util.Locale.US, "%.2f", autoResult.filteredTurn)
+                              + " reason="
+                              + autoResult.reason
+                              + " last_end="
+                              + lastSessionEndReason
+                          : "")
                       + " | build="
                       + BuildConfig.VERSION_NAME);
               boolean emergency = safetyController.isEmergencyLatched();

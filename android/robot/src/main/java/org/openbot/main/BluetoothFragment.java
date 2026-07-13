@@ -58,7 +58,11 @@ public class BluetoothFragment extends Fragment {
         R.layout.ble_listview_tv,
         new int[] {R.id.ble_name, R.id.ble_address, R.id.ble_connection_state});
     vehicle.setBleAdapter(
-        new ScanDeviceAdapter(getActivity(), vehicle.getDeviceList(), res),
+        new ScanDeviceAdapter(
+            getActivity(),
+            vehicle.getDeviceList(),
+            res,
+            device -> vehicle.getBleConnectionStatus(device.address)),
         new CommonRecyclerViewAdapter.OnItemClickListener() {
           @Override
           public void onItemClick(View itemView, int position) {

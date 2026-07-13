@@ -10,11 +10,19 @@ import java.util.List;
 import org.openbot.R;
 
 public class ScanDeviceAdapter extends CommonRecyclerViewAdapter<BleDevice> {
+  public interface ConnectionStatusProvider {
+    String getStatus(BleDevice device);
+  }
+
+  private final ConnectionStatusProvider statusProvider;
+
   public ScanDeviceAdapter(
       @NonNull Context context,
       @NonNull List<BleDevice> dataList,
-      @NonNull SparseArray<int[]> resLayoutAndViewIds) {
+      @NonNull SparseArray<int[]> resLayoutAndViewIds,
+      @NonNull ConnectionStatusProvider statusProvider) {
     super(context, dataList, resLayoutAndViewIds);
+    this.statusProvider = statusProvider;
   }
 
   @Override
@@ -29,14 +37,13 @@ public class ScanDeviceAdapter extends CommonRecyclerViewAdapter<BleDevice> {
     TextView tvConnectionState = (TextView) holder.mViews.get(R.id.ble_connection_state);
     tvName.setText(data.name);
     tvAddress.setText(data.address);
-    if (data.connecting) {
-      tvConnectionState.setText("Connecting");
+    String status = statusProvider.getStatus(data);
+    tvConnectionState.setText(status);
+    if ("连接中".equals(status) || "初始化串口".equals(status) || "自动重试".equals(status)) {
       tvConnectionState.setTextColor(Color.BLUE);
-    } else if (data.connected) {
-      tvConnectionState.setText("Disconnect");
+    } else if ("断开".equals(status)) {
       tvConnectionState.setTextColor(Color.RED);
-    } else if (!data.connected) {
-      tvConnectionState.setText("Connect");
+    } else {
       tvConnectionState.setTextColor(Color.BLACK);
     }
   }
