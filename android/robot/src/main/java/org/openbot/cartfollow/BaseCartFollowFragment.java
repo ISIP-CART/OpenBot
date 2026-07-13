@@ -316,7 +316,6 @@ public class BaseCartFollowFragment extends CameraFragment {
 
   @Override
   public synchronized void onResume() {
-    croppedBitmap = null;
     handlerThread = new HandlerThread("inference");
     handlerThread.start();
     handler = new Handler(handlerThread.getLooper());
@@ -369,35 +368,45 @@ public class BaseCartFollowFragment extends CameraFragment {
       updateCropImageInfo();
       if (detector == null) return;
     }
+    if (croppedBitmap == null || frameToCropTransform == null || cropToFrameTransform == null) {
+      Timber.w("Inference buffers were missing; rebuilding the detector configuration.");
+      updateCropImageInfo();
+      if (croppedBitmap == null || frameToCropTransform == null || cropToFrameTransform == null)
+        return;
+    }
 
     ++frameNum;
     if (binding == null || !isInferenceEnabled()) return;
     if (computingNetwork) return;
 
+    final Detector activeDetector = detector;
+    final Bitmap activeCroppedBitmap = croppedBitmap;
+    final Matrix activeFrameToCropTransform = frameToCropTransform;
+    final Matrix activeCropToFrameTransform = cropToFrameTransform;
     computingNetwork = true;
     runInBackground(
         () -> {
-          final Canvas canvas = new Canvas(croppedBitmap);
+          final Canvas canvas = new Canvas(activeCroppedBitmap);
           Bitmap workingFrame = bitmap;
           if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
             Bitmap flipped = CameraUtils.flipBitmapHorizontal(bitmap);
-            canvas.drawBitmap(flipped, frameToCropTransform, null);
+            canvas.drawBitmap(flipped, activeFrameToCropTransform, null);
             workingFrame = flipped;
           } else {
-            canvas.drawBitmap(bitmap, frameToCropTransform, null);
+            canvas.drawBitmap(bitmap, activeFrameToCropTransform, null);
           }
 
-          if (detector != null) {
+          if (activeDetector != null) {
             final long startTime = SystemClock.elapsedRealtime();
             final List<Detector.Recognition> results =
-                detector.recognizeImage(croppedBitmap, classType);
+                activeDetector.recognizeImage(activeCroppedBitmap, classType);
             lastProcessingTimeMs = SystemClock.elapsedRealtime() - startTime;
 
             final List<Detector.Recognition> mappedRecognitions = new ArrayList<>();
             for (final Detector.Recognition result : results) {
               final RectF location = result.getLocation();
               if (location != null && result.getConfidence() >= minConfidence) {
-                cropToFrameTransform.mapRect(location);
+                activeCropToFrameTransform.mapRect(location);
                 result.setLocation(location);
                 mappedRecognitions.add(result);
               }
