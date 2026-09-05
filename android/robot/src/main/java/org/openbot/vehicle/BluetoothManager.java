@@ -411,7 +411,7 @@ public class BluetoothManager {
       @Override
       public void onCharacteristicChanged(byte[] data, BleDevice device) {
         if (!isActiveAttempt(generation, address)) return;
-        readValue = new String(data);
+        readValue = new String(data, java.nio.charset.StandardCharsets.US_ASCII);
         onSerialDataReceived(readValue);
       }
 
@@ -746,7 +746,7 @@ public class BluetoothManager {
     if (adapter != null) adapter.notifyDataSetChanged();
   }
 
-  private void onSerialDataReceived(String data) {
+  private synchronized void onSerialDataReceived(String data) {
     Logger.i("Serial data received from BLE: " + data);
     for (String line : serialLineAccumulator.accept(data)) {
       localBroadcastManager.sendBroadcast(

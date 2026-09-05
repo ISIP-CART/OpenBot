@@ -365,6 +365,8 @@ public abstract class CameraActivity extends AppCompatActivity
                 case Constants.DEVICE_ACTION_DATA_RECEIVED:
                   long timestamp = SystemClock.elapsedRealtimeNanos();
                   String data = intent.getStringExtra("data");
+                  if (!vehicle.acceptsTransport(intent.getStringExtra("from"))
+                      || data == null || data.isEmpty() || vehicle.processRangeExtension(data)) break;
                   char header = data.charAt(0);
                   String body = data.substring(1);
                   int type = -1;

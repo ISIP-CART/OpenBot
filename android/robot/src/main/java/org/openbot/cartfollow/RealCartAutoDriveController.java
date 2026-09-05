@@ -264,6 +264,15 @@ public final class RealCartAutoDriveController {
     return maximumGear;
   }
 
+  synchronized Result shopping(ShoppingFollowController.Output out, FollowStateMachine.FrameResult frame) {
+    boolean pivot = out.left * out.right < 0;
+    return remember(new Result(out.left, out.right, pivot ? Phase.PIVOT : out.left==0 && out.right==0 ? Phase.WAIT_TARGET
+            : out.left<out.right ? Phase.CURVE_LEFT : out.left>out.right ? Phase.CURVE_RIGHT : Phase.MOVING_STRAIGHT,
+        out.reason, frame == null ? null : frame.steeringEvidence, Float.NaN, false,
+        pivot ? AimDecision.pivot(out.left < 0, 0f, Math.abs(out.left), out.reason) : AimDecision.of(AimDecision.Mode.CURVE, frame==null||frame.steeringEvidence==null?0:frame.steeringEvidence.rawError,out.reason),
+        out.left + out.right > 0 ? TranslationDecision.allow(Math.max(out.left,out.right),out.reason) : TranslationDecision.block(out.reason)));
+  }
+
   public synchronized Result search(RealCartSearchController.Result search) {
     aimController.reset();
     maintainedStart.reset();

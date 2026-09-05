@@ -101,7 +101,10 @@ public class MainActivity extends AppCompatActivity {
                   Timber.i("USB device detached");
                   break;
                 case DEVICE_ACTION_DATA_RECEIVED:
-                  viewModel.setDeviceData(intent.getStringExtra("data"));
+                  if (!vehicle.acceptsTransport(intent.getStringExtra("from"))) break;
+                  String serialLine = intent.getStringExtra("data");
+                  if (serialLine == null || serialLine.isEmpty()) break;
+                  if (!vehicle.processRangeExtension(serialLine)) viewModel.setDeviceData(serialLine);
                   break;
               }
             }

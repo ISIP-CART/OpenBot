@@ -36,6 +36,7 @@ public final class YawTurnTracker {
   private long integrationTimestampNs = -1L;
   private SteeringEvidence.Direction expectedDirection = SteeringEvidence.Direction.NONE;
   private float turnedDegrees;
+  private float headingDegrees;
   private boolean wrongDirection;
 
   public synchronized void setSensorStatus(boolean exists, boolean registered) {
@@ -90,11 +91,13 @@ public final class YawTurnTracker {
     lastReceiptNs = System.nanoTime();
     long previous = integrationTimestampNs;
     integrationTimestampNs = timestampNs;
-    if (!gravityFresh() || expectedDirection == SteeringEvidence.Direction.NONE || previous < 0L)
+    if (!gravityFresh() || previous < 0L)
       return;
     long deltaNs = timestampNs - previous;
     if (deltaNs <= 0L || deltaNs > FRESH_NS) return;
     float signedRate = x * gravityX + y * gravityY + z * gravityZ;
+    if (Math.abs(signedRate) >= .03f) headingDegrees += signedRate * (deltaNs / 1_000_000_000f) * RAD_TO_DEG;
+    if (expectedDirection == SteeringEvidence.Direction.NONE) return;
     if (Math.abs(signedRate) < 0.03f) {
       wrongDirection = false;
       return;
@@ -128,6 +131,8 @@ public final class YawTurnTracker {
     long age = lastGravityReceiptNs < 0L ? -1L : System.nanoTime() - lastGravityReceiptNs;
     return gravityAvailable && age >= 0L && age <= FRESH_NS;
   }
+
+  public synchronized float getHeadingDegrees() { return headingDegrees; }
 
   public synchronized float getTurnedDegrees() {
     return turnedDegrees;

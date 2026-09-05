@@ -126,6 +126,7 @@ public abstract class ControlsFragment extends Fragment implements ServerListene
         .observe(
             getViewLifecycleOwner(),
             data -> {
+              if (data == null || data.isEmpty()) return;
               char header = data.charAt(0);
               String body = data.substring(1);
 
@@ -176,7 +177,7 @@ public abstract class ControlsFragment extends Fragment implements ServerListene
                   // do nothing
                   break;
                 case '!':
-                  vehicle.recordFirmwareError(data);
+                  if (!vehicle.processRangeExtension(data)) vehicle.recordFirmwareError(data);
                   break;
               }
 

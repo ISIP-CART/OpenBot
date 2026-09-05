@@ -29,6 +29,17 @@ public final class RealCartSafetyController {
     }
   }
 
+  private final ShoppingFollowController shopping = new ShoppingFollowController();
+  public synchronized void setShoppingEnvironment(org.openbot.vehicle.R3TelemetrySession.Status range,
+      float heading, boolean gyroFresh, boolean angledSides) {
+    shopping.environment(range, heading, gyroFresh, angledSides);
+    shopping.tuning(autoDriveController.getSteeringStrengthPercent(),autoDriveController.getMaximumGear());
+  }
+  public synchronized boolean shoppingEnabled() { return shopping.enabled(); }
+  public synchronized String shoppingDiagnostic() { return shopping.diagnostic(); }
+  public synchronized boolean shoppingLearningRisk() { return shopping.learningRisk(); }
+  public synchronized boolean shoppingExploring() { return shopping.exploring(); }
+
   private Mode mode = Mode.MANUAL;
   private boolean foreground;
   private boolean connected;
@@ -50,6 +61,7 @@ public final class RealCartSafetyController {
       autoUnlocked = false;
       autoRunEnabled = false;
       autoMotionActive = false;
+      shopping.reset();
       autoDriveController.reset("background");
     }
   }
@@ -61,6 +73,7 @@ public final class RealCartSafetyController {
       autoUnlocked = false;
       autoRunEnabled = false;
       autoMotionActive = false;
+      shopping.reset();
       autoDriveController.reset("ble_not_ready");
     }
   }
@@ -71,6 +84,7 @@ public final class RealCartSafetyController {
     autoRunEnabled = false;
     autoMotionActive = false;
     lastInferenceMs = -1L;
+    shopping.reset();
     autoDriveController.reset("mode_change");
   }
 
@@ -92,6 +106,7 @@ public final class RealCartSafetyController {
     autoRunEnabled = enabled;
     autoMotionActive = false;
     lastInferenceMs = enabled ? nowMs : -1L;
+    shopping.reset();
     autoDriveController.reset(enabled ? "start_arming" : "start_off");
     lastFrame = null;
     lastSequence = -1;
@@ -104,6 +119,7 @@ public final class RealCartSafetyController {
     lastFrame = null;
     autoMotionActive = false;
     currentAuto = stop("session_changed");
+    shopping.reset();
     autoDriveController.reset("session_changed");
   }
 
@@ -112,6 +128,7 @@ public final class RealCartSafetyController {
     autoUnlocked = false;
     autoRunEnabled = false;
     autoMotionActive = false;
+    shopping.reset();
     autoDriveController.reset("emergency_stop");
   }
 
@@ -146,6 +163,7 @@ public final class RealCartSafetyController {
         || nowMs < frame.frameTiming.receivedAtMs
         || nowMs - frame.frameTiming.receivedAtMs > INFERENCE_TIMEOUT_MS) {
       if (autoMotionActive) return fault("inference_timeout");
+      shopping.reset();
       autoDriveController.reset("frame_stale");
       return currentAuto = stop("frame_stale");
     }
@@ -153,12 +171,14 @@ public final class RealCartSafetyController {
     lastFrame = frame;
     if (frame.state == FollowState.STOP || frame.state == FollowState.IDLE) {
       autoMotionActive = false;
+      shopping.reset();
       autoDriveController.reset("follow_inactive");
       return currentAuto = stop("follow_inactive");
     }
     BehaviorDecisionResult decision = frame.behaviorDecision;
     if (decision == null) {
       autoMotionActive = false;
+      shopping.reset();
       autoDriveController.reset("decision_missing");
       return currentAuto = stop("decision_missing");
     }
@@ -167,8 +187,15 @@ public final class RealCartSafetyController {
       return fault(decision.actionReason);
     if (decision.selectedAction == BehaviorAction.BLOCKED_WAIT) {
       autoMotionActive = false;
+      shopping.reset();
       autoDriveController.reset("blocked_wait");
       return currentAuto = stop("blocked_wait");
+    }
+    if (shopping.enabled()) {
+      ShoppingFollowController.Output planned = shopping.update(frame,nowMs);
+      RealCartAutoDriveController.Result result = autoDriveController.shopping(planned,frame);
+      autoMotionActive = !result.isStop();
+      return currentAuto = new Output(result.left,result.right,result.reason);
     }
     if (search != null && search.lockout) return fault(search.reason);
     RealCartAutoDriveController.Result result =
@@ -188,7 +215,7 @@ public final class RealCartSafetyController {
   public synchronized Output refresh(long nowMs, RealCartSearchController.Result search) {
     if (!canMove() || mode != Mode.AUTO || !autoUnlocked || !autoRunEnabled)
       return currentAuto = stop("auto_blocked");
-    if (search != null && search.lockout) return fault(search.reason);
+    if (!shopping.enabled() && search != null && search.lockout) return fault(search.reason);
     Output timeout = watchdog(nowMs);
     if (timeout != null) return timeout;
     if (lastFrame == null || lastFrame.sessionGeneration != generation)
@@ -200,9 +227,20 @@ public final class RealCartSafetyController {
       return currentAuto = stop("blocked_wait");
     if (nowMs < lastInferenceMs || nowMs - lastInferenceMs > INFERENCE_TIMEOUT_MS)
       return currentAuto = stop("frame_stale");
+    if(shopping.enabled()) {
+      if(!shopping.exploring()
+          && (lastFrame.simulatorIdentity==null || !lastFrame.simulatorIdentity.allowsForward(nowMs))) {
+        return currentAuto = stop("identity_unverified");
+      }
+      ShoppingFollowController.Output planned=shopping.poll(nowMs);
+      RealCartAutoDriveController.Result result=autoDriveController.shopping(planned,lastFrame);
+      autoMotionActive=!result.isStop();
+      return currentAuto=new Output(result.left,result.right,result.reason);
+    }
     if (search != null
         && search.overridesFollow()
         && (search.generation != generation || search.frameSequence != lastSequence)) {
+      shopping.reset();
       autoDriveController.reset("awaiting_current_decision");
       return currentAuto = stop("awaiting_current_decision");
     }
@@ -215,6 +253,7 @@ public final class RealCartSafetyController {
         && (lastFrame.simulatorIdentity == null
             || !lastFrame.simulatorIdentity.allowsForward(nowMs))) {
       autoMotionActive = false;
+      shopping.reset();
       autoDriveController.reset("identity_unverified");
       return currentAuto = stop("identity_unverified");
     }
@@ -228,6 +267,7 @@ public final class RealCartSafetyController {
 
   private Output fault(String reason) {
     autoUnlocked = autoRunEnabled = autoMotionActive = false;
+    shopping.reset();
     autoDriveController.reset(reason);
     return currentAuto = stop(reason);
   }
@@ -251,6 +291,7 @@ public final class RealCartSafetyController {
     if (revokeUnlock) autoUnlocked = false;
     autoRunEnabled = false;
     autoMotionActive = false;
+    shopping.reset();
     autoDriveController.reset(reason);
     lastInferenceMs = -1L;
     lastFrame = null;

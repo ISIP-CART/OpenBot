@@ -62,6 +62,9 @@ public class FollowStateMachine {
     public int distanceCalibrationSampleCount;
     public long distanceCalibrationCompletedAtMs;
     public RangeTelemetrySnapshot rangeTelemetry;
+    public org.openbot.vehicle.R3TelemetrySession.Status r3Telemetry;
+    public float shoppingHeading;
+    public boolean shoppingGyroFresh, shoppingSides45;
     public boolean rangeFresh;
     public String rangeGateReason = "";
 

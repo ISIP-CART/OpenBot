@@ -76,6 +76,7 @@ public class CartFollowDiagnosticSession {
   private volatile boolean sawAutoMode;
   private long lastRangeSequence = Long.MIN_VALUE;
   private String lastRangeState = "";
+  private String lastR3State = "";
   private volatile boolean finished;
   private long lastGalleryImageMs = -1, lastSceneMs = -1;
   private String lastSceneKey = "";
@@ -172,10 +173,12 @@ public class CartFollowDiagnosticSession {
                 .put("started_monotonic_ms", startedMonotonicMs)
                 .put("app_mode", mode)
                 .put("initial_control_mode", initialControlMode)
-                .put("log_version", 8)
+                .put("log_version", 11)
                 .put("build", org.openbot.BuildConfig.VERSION_NAME)
                 .put("build_stamp", org.openbot.BuildConfig.CART_BUILD_STAMP)
                 .put("strategy", org.openbot.cartfollow.FollowTuning.VERSION)
+                .put("shopping_strategy", org.openbot.cartfollow.ShoppingFollowController.VERSION)
+                .put("r3_visible_invalid_policy", "assume_clear_when_identity_and_camera_current")
                 .put("curve_enter_error", org.openbot.cartfollow.FollowTuning.CURVE_ENTER)
                 .put("curve_exit_error", org.openbot.cartfollow.FollowTuning.CURVE_EXIT)
                 .put("curve_gain", "linear((damped_abs_error-0.03)/0.82)")
@@ -234,11 +237,11 @@ public class CartFollowDiagnosticSession {
                 .put("weak_max_gear", 18)
                 .put("max_gear", 21)
                 .put("real_frame_max_age_ms", 400);
-            json.put("range_protocol", "CART_AT8236_V1_s")
+            json.put("range_protocol", "CART_AT8236_V1_s_or_R3_V1")
                 .put("range_telemetry_period_ms", 100)
                 .put("range_stale_ms", 250)
                 .put("range_source", "minimum_of_three_source_unknown")
-                .put("range_android_behavior", "observation_only")
+                .put("range_android_behavior", "R3_shopping_control_V1_observation_only")
                 .put("range_firmware_may_reject_motion", true)
                 .put("firmware_c14_mmps", 240)
                 .put("firmware_c21_mmps", 600);
@@ -323,6 +326,14 @@ public class CartFollowDiagnosticSession {
     if (normalized.equals("manual")) sawManualMode = true;
     if (normalized.equals("auto")) sawAutoMode = true;
     control("mode_changed", "from=" + previous + ",to=" + normalized);
+  }
+
+  /** R3 raw samples and availability transitions share the ordered control diagnostic stream. */
+  public synchronized void r3(org.openbot.vehicle.R3TelemetrySession.Status status, long nowMs) {
+    String value = status.diagnostic(nowMs);
+    if (value.equals(lastR3State)) return;
+    lastR3State = value;
+    control("r3_telemetry", value + ";android_behavior=R3_shopping_control");
   }
 
   /** Records each new V1 range sample and capability/freshness/error state transition. */
