@@ -30,6 +30,7 @@ public class Vehicle {
   private final SensorReading rightWheelRpm = new SensorReading();
   private final SensorReading sonarReading = new SensorReading();
   private volatile RangeTelemetrySnapshot rangeTelemetry = RangeTelemetrySnapshot.unavailable();
+  private final R3TelemetrySession r3Telemetry = new R3TelemetrySession();
 
   private float minMotorVoltage = 2.5f;
   private float lowBatteryVoltage = 9.0f;
@@ -185,6 +186,9 @@ public class Vehicle {
     setHasSonar(false);
     rangeTelemetry = rangeTelemetry.withCapability(message.contains(":s:"));
 
+    r3Telemetry.discover(message.contains(":r3v1:"), message.contains(":s:"),
+        SystemClock.elapsedRealtime(), this::sendStringToDevice);
+
     if (message.contains(":v:")) {
       setHasVoltageDivider(true);
       setVoltageFrequency(250);
@@ -194,7 +198,7 @@ public class Vehicle {
     }
     if (message.contains(":s:")) {
       setHasSonar(true);
-      setSonarFrequency(100);
+
     }
     if (message.contains(":b:")) {
       setHasBumpSensor(true);
@@ -311,7 +315,21 @@ public class Vehicle {
     rangeTelemetry = rangeTelemetry.withFirmwareError(error.trim(), SystemClock.elapsedRealtime());
   }
 
+  public R3TelemetrySession.Status getR3Telemetry() { return r3Telemetry.status(); }
+
+  public boolean processRangeExtension(String line) {
+    if ("!ERR,bad_r3_config".equals(line)) recordFirmwareError(line);
+    return r3Telemetry.accept(line, SystemClock.elapsedRealtime(), this::sendStringToDevice);
+  }
+
+  /** Drop telemetry from the inactive transport rather than mixing independent sequence spaces. */
+  public boolean acceptsTransport(String source) {
+    return source == null || ("usb".equals(source) && "USB".equals(getConnectionType()))
+        || ("ble".equals(source) && "Bluetooth".equals(getConnectionType()));
+  }
+
   private void resetRangeTelemetry() {
+    r3Telemetry.reset();
     setHasSonar(false);
     rangeTelemetry = RangeTelemetrySnapshot.unavailable();
   }
@@ -424,6 +442,7 @@ public class Vehicle {
 
   public void connectUsb() {
     if (usbConnection == null) usbConnection = new UsbConnection(context, baudRate);
+    resetRangeTelemetry();
     usbConnected = usbConnection.startUsbConnection();
     if (usbConnected) {
       if (heartbeatTimer == null) {
@@ -439,6 +458,7 @@ public class Vehicle {
       usbConnection.stopUsbConnection();
       usbConnection = null;
       usbConnected = false;
+      resetRangeTelemetry();
     }
   }
 
@@ -508,6 +528,7 @@ public class Vehicle {
     @Override
     public void run() {
       sendHeartbeat(750);
+      r3Telemetry.poll(SystemClock.elapsedRealtime(), Vehicle.this::sendStringToDevice);
     }
   }
 

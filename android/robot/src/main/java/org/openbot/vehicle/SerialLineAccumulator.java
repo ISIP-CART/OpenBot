@@ -4,30 +4,28 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-/** Reassembles newline-delimited serial messages across BLE/USB chunks. */
+/** ASCII lines of at most 128 bytes including newline; discard through newline on overflow. */
 public final class SerialLineAccumulator {
-  private static final int MAX_BUFFER_CHARS = 1024;
   private final StringBuilder pending = new StringBuilder();
-
+  private int bytes;
+  private boolean dropping;
   public synchronized List<String> accept(String chunk) {
     if (chunk == null || chunk.isEmpty()) return Collections.emptyList();
-    pending.append(chunk);
-    if (pending.length() > MAX_BUFFER_CHARS && pending.indexOf("\n") < 0) {
-      pending.setLength(0);
-      return Collections.emptyList();
-    }
     List<String> lines = new ArrayList<>();
-    int newline;
-    while ((newline = pending.indexOf("\n")) >= 0) {
-      String line = pending.substring(0, newline);
-      pending.delete(0, newline + 1);
-      if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
-      if (!line.isEmpty()) lines.add(line);
+    for (int i = 0; i < chunk.length(); i++) {
+      char c = chunk.charAt(i);
+      if (c == '\n') {
+        if (!dropping && bytes + 1 <= 128 && pending.length() > 0) lines.add(pending.toString());
+        clear();
+      } else {
+        bytes = Math.min(128, bytes + 1);
+        if (bytes > 127 || c > 127 || c < 32 && c != '\r') {
+          dropping = true; pending.setLength(0);
+        }
+        if (!dropping && c != '\r') pending.append(c);
+      }
     }
     return lines;
   }
-
-  public synchronized void clear() {
-    pending.setLength(0);
-  }
+  public synchronized void clear() { pending.setLength(0); bytes = 0; dropping = false; }
 }

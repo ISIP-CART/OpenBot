@@ -44,6 +44,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
   private String lastRangeStateKey = "";
   private long lastFirmwareErrorAtMs = -1L;
   private long autoObservationAtMs = -1L;
+  private volatile boolean shoppingSides45;
   private volatile org.openbot.cartfollow.diagnostics.CartFollowDiagnosticSession
       activeDiagnosticSession;
   private RealCartAutoDriveController.Phase lastLoggedAutoPhase;
@@ -93,6 +94,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
             latestOutput = manualOutput(manualTouchRouter.getActiveControl(), now);
           }
           if (safetyController.getMode() == RealCartSafetyController.Mode.AUTO) {
+            updateShoppingEnvironment();
             latestOutput = safetyController.refresh(now, searchController.poll(now, yaw));
             if (binding.startSwitch.isChecked() && !safetyController.isAutoUnlocked())
               finishAutoSession(latestOutput.reason, true);
@@ -261,11 +263,12 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
   protected void onFollowFrame(FollowStateMachine.FrameResult frameResult) {
     long now = SystemClock.elapsedRealtime();
     autoObservationAtMs = frameResult.frameTiming == null ? -1L : frameResult.frameTiming.receivedAtMs;
+    updateShoppingEnvironment();
     latestOutput = safetyController.auto(frameResult, now, searchController.poll(now, yaw));
     RangeTelemetrySnapshot range = vehicle.getRangeTelemetry();
     frameResult.rangeTelemetry = range;
     frameResult.rangeFresh = range.isFresh(now, RANGE_STALE_MS);
-    frameResult.rangeGateReason = "observation_only";
+    frameResult.rangeGateReason = safetyController.shoppingEnabled() ? latestOutput.reason : "observation_only";
     logAutoDecision(frameResult);
     RealCartAutoDriveController.Result autoResult = safetyController.getAutoDriveResult();
     if (frameResult != null) frameResult.realDriveResult = autoResult;
@@ -277,6 +280,11 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
 
   @Override
   protected void prepareSimulatorLearningFrame(FollowStateMachine.FrameResult frame, long now) {
+    updateShoppingEnvironment();
+    frame.r3Telemetry=vehicle.getR3Telemetry();
+    frame.shoppingHeading=yaw.getHeadingDegrees(); frame.shoppingGyroFresh=yaw.isAvailable();
+    frame.shoppingSides45=shoppingSides45;
+    if(safetyController.shoppingEnabled()) return;
     RealCartSearchController.Result search = searchController.update(frame, now, yaw);
     frame.directedReacquireEvidence = search.evidence;
     if (searchController.consumeEnterRequest()) stateMachine.enterDirectedReacquire();
@@ -289,7 +297,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
 
   @Override
   protected boolean simulatorExitLearningRisk(long now) {
-    return searchController.learningRisk(now);
+    return safetyController.shoppingLearningRisk() || searchController.learningRisk(now);
   }
 
   @Override
@@ -639,6 +647,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
         activeDiagnosticSession;
     if (!isDiagnosticLoggingEnabled() || session == null || vehicle == null) return;
     RangeTelemetrySnapshot telemetry = vehicle.getRangeTelemetry();
+    session.r3(vehicle.getR3Telemetry(), now);
+    session.control("shopping_policy",safetyController.shoppingDiagnostic());
     boolean fresh = telemetry.isFresh(now, RANGE_STALE_MS);
     RealCartSafetyController.Output requested = latestOutput;
     session.range(
@@ -718,7 +728,13 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
     mainHandler.post(commandScheduler);
   }
 
+  private void updateShoppingEnvironment() {
+    if(vehicle!=null) safetyController.setShoppingEnvironment(vehicle.getR3Telemetry(),
+        yaw.getHeadingDegrees(),yaw.isAvailable(),shoppingSides45);
+  }
+
   private void sendOutput(RealCartSafetyController.Output output) {
+    updateShoppingEnvironment();
     if (vehicle == null || output == null) return;
     if (!output.isStop() && safetyController.getMode() == RealCartSafetyController.Mode.AUTO) {
       output =
@@ -798,6 +814,20 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
 
   static String commandForAutoResult(RealCartAutoDriveController.Result result) {
     if (result == null) return "自动控制未就绪";
+    String shoppingLabel=null;
+    if(result.reason.endsWith("_range_assumed_clear")) shoppingLabel="目标可见，测距无有效回波，按视觉正常跟随";
+    else if(result.reason.startsWith("corner_")) shoppingLabel="拐角探行";
+    else if(result.reason.equals("width_follow")) shoppingLabel="按人物宽度跟随";
+    else if(result.reason.equals("width_hold")) shoppingLabel="已达到近距保持区";
+    else if(result.reason.equals("width_unreliable")) shoppingLabel="人物转身或裁切，暂停追近";
+    else if(result.reason.equals("visible_edge_arc")) shoppingLabel="目标接近画面边缘，低速跟弯";
+    else if(result.reason.equals("range_front_near_latched")) shoppingLabel="前方近障碍，等待3次有效净空确认";
+    else if(result.reason.equals("range_side_near_latched")) shoppingLabel="转向侧近障碍，等待有效净空确认";
+    else if(result.reason.equals("range_telemetry_unavailable")) shoppingLabel="三路遥测未就绪或中断";
+    else if(result.reason.equals("range_sensor_fault")) shoppingLabel="测距传感器故障或未安装";
+    else if(result.reason.startsWith("range_")) shoppingLabel="当前动作缺少有效测距或空间不足";
+    else if(result.reason.startsWith("shopping_")) shoppingLabel="近距离跟随";
+    if(shoppingLabel!=null) return shoppingLabel+" · c"+result.left+","+result.right+" · "+result.reason;
     switch (result.phase) {
       case MOVING_STRAIGHT:
         return "小车直行 · c" + result.left + "," + result.right;
@@ -944,9 +974,10 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
                       + vehicle.getBleWriteStatus()
                       + " | build="
                       + BuildConfig.VERSION_NAME
-                      + "\n测距(min/source unknown)="
+                      + "\n" + vehicle.getR3Telemetry().display(now)
+                      + "\n旧测距(min/source unknown)="
                       + rangeText
-                      + " | Android=observation_only"
+                      + "\n" + safetyController.shoppingDiagnostic()
                       + (range.lastFirmwareError.isEmpty()
                           ? ""
                           : "\n最近固件错误（非当前帧回执）=" + range.lastFirmwareError + " @" + range.firmwareErrorAtMs));
@@ -958,7 +989,9 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
                 binding.realSafetyNotice.setText("急停已锁存，请重启 ESP32 后重新连接");
               } else {
                 binding.realSafetyNotice.setVisibility(View.VISIBLE);
-                if (!range.capabilityAdvertised) {
+                if (vehicle.getR3Telemetry().advertised) {
+                  binding.realSafetyNotice.setText("有效近距触发停车；目标可见且测距无回波时正常跟随；遮挡探行须有效测距；固件测距保护未启用");
+                } else if (!range.capabilityAdvertised) {
                   binding.realSafetyNotice.setText("Android 仅记录：固件未声明测距能力；ESP32 仍可能本地拒绝运动");
                 } else if (!range.isFresh(now, RANGE_STALE_MS)) {
                   binding.realSafetyNotice.setText("Android 仅记录：测距不可用或过期；ESP32 仍可能本地拒绝运动");
@@ -975,9 +1008,9 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
     long now = SystemClock.elapsedRealtime();
     RangeTelemetrySnapshot range = vehicle.getRangeTelemetry();
     long age = range.ageMs(now);
-    return String.format(
+    return safetyController.shoppingDiagnostic() + "\n" + vehicle.getR3Telemetry().display(now) + "\n" + String.format(
         java.util.Locale.US,
-        "rangeProtocol=V1+s capability=%s\nrangeMinMm=%d ageMs=%d fresh=%s source=three_way_min_unknown\nandroidRangeBehavior=observation_only\nfirmwareMayRejectMotion=true\nfirmwareError=%s",
+        "legacyRangeProtocol=V1+s capability=%s\nrangeMinMm=%d ageMs=%d fresh=%s source=three_way_min_unknown\nlegacyRangeBehavior=observation_only;R3=shopping_control\nfirmwareMayRejectMotion=true\nfirmwareError=%s",
         range.capabilityAdvertised,
         range.minimumDistanceMm,
         age == Long.MAX_VALUE ? -1L : age,
@@ -1104,6 +1137,20 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
               if (binding != null && v == binding.getRoot())
                 configureResponsiveLayout(r - l, b - t);
             });
+    android.content.SharedPreferences install = requireContext().getSharedPreferences("shopping_install",0);
+    shoppingSides45=install.getBoolean("sides_45",false);
+    androidx.appcompat.widget.SwitchCompat sideSwitch = new androidx.appcompat.widget.SwitchCompat(requireContext());
+    sideSwitch.setText("左右传感器已固定朝斜前45°（开启沿边探行）");
+    sideSwitch.setChecked(shoppingSides45);
+    sideSwitch.setOnCheckedChangeListener((button,checked)->{
+      if(binding.startSwitch.isChecked()) {
+        button.setChecked(shoppingSides45);
+        Toast.makeText(requireContext(),"请先停止跟随，再修改安装朝向",Toast.LENGTH_SHORT).show();
+        return;
+      }
+      shoppingSides45=checked; install.edit().putBoolean("sides_45",checked).apply();
+    });
+    binding.simulatorExperimentPanel.addView(sideSwitch);
     binding.realExperimentOptions.setVisibility(View.VISIBLE);
     binding.recoveryTimeoutGroup.setVisibility(View.GONE);
     binding.simulatorReconfirm.setVisibility(View.GONE);

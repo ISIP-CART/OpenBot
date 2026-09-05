@@ -12,13 +12,11 @@ import android.content.IntentFilter;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
-import android.os.AsyncTask;
 import android.os.Build;
 import android.widget.Toast;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import com.felhr.usbserial.UsbSerialDevice;
 import com.felhr.usbserial.UsbSerialInterface;
-import java.io.UnsupportedEncodingException;
 import java.util.Map;
 import org.openbot.env.Logger;
 import org.openbot.utils.Constants;
@@ -38,7 +36,6 @@ public class UsbConnection {
   private UsbSerialDevice serialDevice;
   private final SerialLineAccumulator serialLineAccumulator = new SerialLineAccumulator();
   private final LocalBroadcastManager localBroadcastManager;
-  private String buffer = "";
   private final Context context;
   private final int baudRate;
   private boolean busy;
@@ -64,21 +61,7 @@ public class UsbConnection {
   }
 
   private final UsbSerialInterface.UsbReadCallback callback =
-      data -> {
-        try {
-          String dataUtf8 = new String(data, "UTF-8");
-          buffer += dataUtf8;
-          int index;
-          while ((index = buffer.indexOf('\n')) != -1) {
-            final String dataStr = buffer.substring(0, index).trim();
-            buffer = buffer.length() == index ? "" : buffer.substring(index + 1);
-
-            AsyncTask.execute(() -> onSerialDataReceived(dataStr));
-          }
-        } catch (UnsupportedEncodingException e) {
-          LOGGER.e("Error receiving USB data");
-        }
-      };
+      data -> onSerialDataReceived(new String(data, java.nio.charset.StandardCharsets.US_ASCII));
 
   private final BroadcastReceiver usbReceiver =
       new BroadcastReceiver() {
@@ -112,6 +95,7 @@ public class UsbConnection {
       };
 
   public boolean startUsbConnection() {
+    serialLineAccumulator.clear();
     IntentFilter localIntentFilter = new IntentFilter();
     localIntentFilter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
     localIntentFilter.addAction(ACTION_USB_PERMISSION);
@@ -167,7 +151,7 @@ public class UsbConnection {
     return success;
   }
 
-  private void onSerialDataReceived(String data) {
+  private synchronized void onSerialDataReceived(String data) {
     LOGGER.i("Serial data received from USB: " + data);
     for (String line : serialLineAccumulator.accept(data)) {
       localBroadcastManager.sendBroadcast(

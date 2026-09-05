@@ -56,6 +56,7 @@ public final class SimulatorAutoDriveController {
     }
   }
 
+  private final ShoppingFollowController shopping = new ShoppingFollowController();
   private long recoveryLimitMs = 2000L;
   private long missingSinceMs = -1L;
   private int currentGear = GEAR_LOW;
@@ -72,6 +73,7 @@ public final class SimulatorAutoDriveController {
   }
 
   public Result reset(String reason) {
+    shopping.reset();
     maintainedStart.reset();
     missingSinceMs = -1L;
     currentGear = GEAR_LOW;
@@ -83,6 +85,20 @@ public final class SimulatorAutoDriveController {
   }
 
   public Result update(FollowStateMachine.FrameResult frame, long nowMs) {
+    if(frame!=null && frame.r3Telemetry!=null) {
+      shopping.environment(frame.r3Telemetry,frame.shoppingHeading,frame.shoppingGyroFresh,frame.shoppingSides45);
+      if(shopping.enabled()) {
+        if(frame.state==FollowState.STOP || frame.state==FollowState.IDLE || frame.behaviorDecision==null
+            || frame.behaviorDecision.selectedAction==BehaviorAction.HARD_STOP
+            || frame.behaviorDecision.selectedAction==BehaviorAction.EMERGENCY_STOP
+            || frame.behaviorDecision.selectedAction==BehaviorAction.BLOCKED_WAIT) {
+          shopping.reset(); return stopped(Phase.RECOVERY_STOP,"shopping_safety_stop",false,0);
+        }
+        ShoppingFollowController.Output out=shopping.update(frame,nowMs);
+        return new Result(out.left*out.right<0?Phase.PIVOT:Phase.FOLLOW, Math.max(out.left,out.right),
+            out.left,out.right,out.reason,false,0,ShoppingFollowController.CORNER_LIMIT_MS);
+      }
+    }
     boolean hold =
         frame != null
             && frame.simulatorIdentity != null

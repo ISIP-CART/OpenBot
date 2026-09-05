@@ -34,12 +34,21 @@ public class SerialLineAccumulatorTest {
     assertEquals("s90", decoder.accept("s90\n").get(0));
   }
 
+  @Test public void enforcesWholeLineByteLimitEvenWithNewlineInSameChunk() {
+    SerialLineAccumulator decoder = new SerialLineAccumulator();
+    assertEquals(127, decoder.accept(new String(new char[127]).replace('\0', 'x') + "\n").get(0).length());
+    assertEquals(java.util.Collections.singletonList("s90"),
+        decoder.accept(new String(new char[128]).replace('\0', 'x') + "\ns90\n"));
+    assertTrue(decoder.accept("bad\u0080line\n").isEmpty());
+  }
+
   @Test
   public void dropsUnboundedLineWithoutBroadcastingIt() {
     SerialLineAccumulator decoder = new SerialLineAccumulator();
     StringBuilder oversized = new StringBuilder();
     for (int i = 0; i < 1100; i++) oversized.append('x');
     assertTrue(decoder.accept(oversized.toString()).isEmpty());
+    assertTrue(decoder.accept("r\n").isEmpty());
     assertEquals("r", decoder.accept("r\n").get(0));
   }
 }
