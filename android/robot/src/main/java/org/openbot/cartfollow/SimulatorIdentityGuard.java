@@ -5,6 +5,10 @@ import java.util.Set;
 
 /** Session-local authorization, separate from accumulated tracking belief and hardware policy. */
 public final class SimulatorIdentityGuard {
+  private static final long GLOBAL_WINDOW_MS = 2000L;
+  private static final long GLOBAL_EVIDENCE_GAP_MS = 500L;
+  private static final float GLOBAL_MEDIUM_SCORE = .70f;
+  private static final int GLOBAL_LOW_RESET_COUNT = 2;
   public enum State {
     VERIFIED,
     TRACK_STABLE,
@@ -197,7 +201,11 @@ public final class SimulatorIdentityGuard {
   private long lastFrame = -1L;
   private RecoveryType recoveryType = RecoveryType.NONE;
   private long firstFreshAt = -1L;
+  private long verificationWindowStartedAt = -1L;
+  private long lastVerificationEvidenceAt = -1L;
+  private int globalLowFreshStreak;
   private int continuityTrack = -1;
+  private int initializationContinuityTrack = -1;
   private long weakSince = -1;
   private long lastObservedAt = -1L;
   private long recoveryDeadline = -1L;
@@ -273,6 +281,7 @@ public final class SimulatorIdentityGuard {
   public synchronized void reset() {
     generation = -1L;
     continuityTrack = -1;
+    initializationContinuityTrack = -1;
     weakSince = -1;
     distractors.clear();
     clearVerification();
@@ -294,6 +303,20 @@ public final class SimulatorIdentityGuard {
   public synchronized void begin(long generation) {
     reset();
     this.generation = generation;
+  }
+
+  /** Seeds local continuity after initialization without inventing a ReID match. */
+  public synchronized boolean acceptInitializationContinuity(
+      long session, long frame, long receivedAt, int trackId) {
+    if (session != generation || frame < lastFrame || receivedAt < 0L || trackId < 0) return false;
+    initializationContinuityTrack = trackId;
+    continuityTrack = trackId;
+    lastObservedAt = receivedAt;
+    lastTrustedAt = receivedAt;
+    recoveryDeadline = -1L;
+    recoveryObservations = 0;
+    restrictedRecovery = false;
+    return true;
   }
 
   public synchronized void rememberDistractor(int trackId) {
@@ -447,7 +470,8 @@ public final class SimulatorIdentityGuard {
     boolean ambiguous = associationAmbiguous;
     boolean hardContinuityBreak =
         continuity != null
-            && ("bbox_jump".equals(continuity.reason)
+            && (("bbox_jump".equals(continuity.reason)
+                    && (!local || continuity.observedGeometry == null))
                 || "association_competing".equals(continuity.reason));
     if (distractors.contains(trackId)) return reject(trackId, true, "known_distractor");
     if (lockedId < 0) return reject(trackId, true, "target_lock_missing");
@@ -460,7 +484,6 @@ public final class SimulatorIdentityGuard {
         candidateCount > 1 && receivedAt - Math.max(multiSince, multiCheckAt) > 1000;
     if (candidateCount > 5
         || (multiConflict && continuityTrack >= 0)
-        || multiExpired
         || ambiguous) {
       if (trackId != lockedId || !local || targetLost) recoveryType = RecoveryType.GLOBAL;
       return reject(
@@ -470,9 +493,7 @@ public final class SimulatorIdentityGuard {
               ? "candidate_budget_exceeded"
               : multiConflict
                   ? "identity_conflict"
-                  : multiExpired
-                      ? "multi_check_timeout"
-                      : ambiguous
+                  : ambiguous
                           ? (recoveryType == RecoveryType.GLOBAL
                               ? "global_association_ambiguous"
                               : "association_competing")
@@ -486,7 +507,7 @@ public final class SimulatorIdentityGuard {
             && continuity != null
             && continuity.currentBox != null;
     boolean originalContext =
-        following
+        (following || initializationContinuityTrack == lockedId)
             && continuityTrack == lockedId
             && lastObservedAt >= 0
             && receivedAt - lastObservedAt <= FollowTuning.RECOVERY_CONTEXT_MS;
@@ -496,7 +517,7 @@ public final class SimulatorIdentityGuard {
       recoveryObservations = 0;
     }
     if (recoveryDeadline >= 0L) {
-      if (receivedAt > recoveryDeadline || candidateCount > 1 || hardContinuityBreak
+      if (receivedAt > recoveryDeadline || hardContinuityBreak
           || current && (trackId != lockedId || !local || !highConfidence
               || continuity.observedGeometry == null
               || !continuity.observedGeometry.bboxDefaultOk))
@@ -529,11 +550,20 @@ public final class SimulatorIdentityGuard {
         lastIdentityObservation = localReid.observationId;
         if (!recovering) restrictedRecovery = false;
       }
-      boolean stable = continuity.reliable && (!recovering || recoveryObservations >= 3);
+      boolean independentGeometryContinuity =
+          "bbox_jump".equals(continuity.reason)
+              && local
+              && continuity.observedGeometry != null;
+      boolean stable =
+          (continuity.reliable || independentGeometryContinuity)
+              && (!recovering || recoveryObservations >= 3);
+      boolean motion = stable && !multiExpired;
       if (recovering) restrictedRecovery = true;
       if (recovering && stable) recoveryDeadline = -1L;
       String reason =
-          restrictedRecovery
+          multiExpired
+              ? "multi_check_timeout"
+          : restrictedRecovery
               ? (stable ? "short_recovery_follow" : "short_recovery_verifying")
               : !stable
               ? "tracking_stabilizing"
@@ -550,7 +580,7 @@ public final class SimulatorIdentityGuard {
               highConfidence,
               true,
               continuity.stableFrames,
-              stable,
+              motion,
               stable && highConfidence && candidateCount == 1 && !restrictedRecovery,
               reason);
       Decision result =
@@ -562,7 +592,7 @@ public final class SimulatorIdentityGuard {
               reason,
               State.TRACK_STABLE,
               true,
-              stable,
+              motion,
               tracking.learningAllowed,
               0,
               reason,
@@ -595,7 +625,8 @@ public final class SimulatorIdentityGuard {
     // A candidate becoming spatially local cannot shorten an in-progress global verification.
     if (candidate == trackId && recoveryType == RecoveryType.GLOBAL && verifiedTrack != trackId)
       requestedType = RecoveryType.GLOBAL;
-    if (lastFreshAt >= 0 && now - lastFreshAt > 500L) clearVerification();
+    if (recoveryType != RecoveryType.GLOBAL && lastFreshAt >= 0 && now - lastFreshAt > 500L)
+      clearVerification();
     if (candidate != trackId
         || (recoveryType != requestedType && verifiedTrack != trackId)
         || (recoveryType != requestedType && requestedType == RecoveryType.GLOBAL)) {
@@ -619,6 +650,9 @@ public final class SimulatorIdentityGuard {
         || reid.observationTimeMs < 0L
         || reid.observationTimeMs > receivedAt
         || now - reid.observationTimeMs > 500L) {
+      if (global && candidate == trackId && lastVerificationEvidenceAt >= 0
+          && now-lastVerificationEvidenceAt<=GLOBAL_EVIDENCE_GAP_MS)
+        return verificationHold(trackId,"global_identity_evidence_wait");
       return reject(trackId, false, "identity_evidence_insufficient");
     }
     boolean continuous = continuousContext && !global;
@@ -634,8 +668,33 @@ public final class SimulatorIdentityGuard {
             && reid.observationTimeMs == receivedAt
             && reid.observationId > lastIdentityObservation
             && (maintainedAt < 0 || receivedAt > maintainedAt);
-    if (fresh) lastIdentityObservation = reid.observationId;
+    if (global && lastVerificationEvidenceAt>=0
+        && now-lastVerificationEvidenceAt>GLOBAL_EVIDENCE_GAP_MS) {
+      clearVerification(); candidate=trackId; recoveryType=RecoveryType.GLOBAL;
+    }
+    if (global && verificationWindowStartedAt>=0
+        && receivedAt-verificationWindowStartedAt>GLOBAL_WINDOW_MS) {
+      clearVerification(); candidate=trackId; recoveryType=RecoveryType.GLOBAL;
+    }
+    if (fresh) {
+      lastIdentityObservation = reid.observationId;
+      if (global) {
+        lastVerificationEvidenceAt=receivedAt;
+        if (verificationWindowStartedAt<0) verificationWindowStartedAt=receivedAt;
+        if (!strong && reid.bestScore>=GLOBAL_MEDIUM_SCORE) {
+          globalLowFreshStreak=0;
+          return verificationHold(trackId,"global_reid_medium_hold");
+        }
+        if (!strong) {
+          if (++globalLowFreshStreak<GLOBAL_LOW_RESET_COUNT)
+            return verificationHold(trackId,"global_reid_low_hold");
+          return reject(trackId,false,"global_reid_low_reset");
+        }
+        globalLowFreshStreak=0;
+      }
+    }
     if (!strong) {
+      if (global && !reid.fresh) return verificationHold(trackId,"global_reid_cached_hold");
       return reject(trackId, false, "identity_evidence_insufficient");
     }
     if (reid.fresh
@@ -701,6 +760,13 @@ public final class SimulatorIdentityGuard {
     return verified;
   }
 
+  private Decision verificationHold(int trackId, String reason) {
+    long span=firstFreshAt<0L || lastFreshAt<0L ? 0L : lastFreshAt-firstFreshAt;
+    return new Decision(
+        false,false,trackId,matches,reason,State.AUTO_VERIFY,false,false,false,0L,
+        "not_evaluated",0L,RecoveryType.GLOBAL,span,lastVerificationEvidenceAt,lastObservation);
+  }
+
   private Decision continuityDecision(
       int trackId,
       State state,
@@ -761,6 +827,7 @@ public final class SimulatorIdentityGuard {
     restrictedRecovery = false;
     RecoveryType rejectedType = recoveryType;
     continuityTrack = -1;
+    initializationContinuityTrack = -1;
     resetMaintainedEvidence();
     weakSince = -1;
     clearVerification();
@@ -786,6 +853,9 @@ public final class SimulatorIdentityGuard {
     matches = 0;
     lastFreshAt = -1L;
     firstFreshAt = -1L;
+    verificationWindowStartedAt = -1L;
+    lastVerificationEvidenceAt = -1L;
+    globalLowFreshStreak = 0;
     recoveryType = RecoveryType.NONE;
   }
 }

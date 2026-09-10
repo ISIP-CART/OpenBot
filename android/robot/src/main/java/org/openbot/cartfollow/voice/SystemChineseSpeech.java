@@ -84,9 +84,11 @@ final class SystemChineseSpeech {
     int result =
         tts.speak(
             context.getString(prompt.textRes),
-            prompt.urgent ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD,
+            queueMode(),
             null,
             "voice-cart-" + System.nanoTime());
     if (result == TextToSpeech.ERROR) Timber.w("Voice Cart Simulator: TTS rejected a prompt");
   }
+
+  static int queueMode() { return TextToSpeech.QUEUE_FLUSH; }
 }

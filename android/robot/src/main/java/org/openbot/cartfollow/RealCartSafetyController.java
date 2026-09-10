@@ -191,6 +191,14 @@ public final class RealCartSafetyController {
       autoDriveController.reset("blocked_wait");
       return currentAuto = stop("blocked_wait");
     }
+    if (frame.state == FollowState.AUTO_POSITIONING) {
+      shopping.reset();
+      boolean reverse = decision.selectedAction == BehaviorAction.INITIALIZATION_REVERSE;
+      RealCartAutoDriveController.Result result =
+          autoDriveController.initializationPositioning(reverse, decision.actionReason);
+      autoMotionActive = reverse;
+      return currentAuto = new Output(result.left, result.right, result.reason);
+    }
     if (shopping.enabled()) {
       ShoppingFollowController.Output planned = shopping.update(frame,nowMs);
       RealCartAutoDriveController.Result result = autoDriveController.shopping(planned,frame);
@@ -227,6 +235,15 @@ public final class RealCartSafetyController {
       return currentAuto = stop("blocked_wait");
     if (nowMs < lastInferenceMs || nowMs - lastInferenceMs > INFERENCE_TIMEOUT_MS)
       return currentAuto = stop("frame_stale");
+    if (lastFrame.state == FollowState.AUTO_POSITIONING) {
+      boolean reverse = lastFrame.behaviorDecision != null
+          && lastFrame.behaviorDecision.selectedAction == BehaviorAction.INITIALIZATION_REVERSE;
+      RealCartAutoDriveController.Result result = autoDriveController.initializationPositioning(
+          reverse, lastFrame.behaviorDecision == null ? "decision_missing"
+              : lastFrame.behaviorDecision.actionReason);
+      autoMotionActive = reverse;
+      return currentAuto = new Output(result.left, result.right, result.reason);
+    }
     if(shopping.enabled()) {
       if(!shopping.exploring()
           && (lastFrame.simulatorIdentity==null || !lastFrame.simulatorIdentity.allowsForward(nowMs))) {

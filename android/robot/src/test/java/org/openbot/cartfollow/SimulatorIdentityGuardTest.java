@@ -379,6 +379,130 @@ public class SimulatorIdentityGuardTest {
   }
 
   @Test
+  public void multiPersonTimeoutStopsMotionButKeepsOriginalTrackContext() {
+    SimulatorIdentityGuard guard = new SimulatorIdentityGuard();
+    guard.begin(1);
+    for (int i = 1; i <= 3; i++) continuous(guard, i, i * 300, .99f);
+    SimulatorContinuityTracker.Evidence continuity =
+        new SimulatorContinuityTracker.Evidence(
+            true,
+            "continuous_observations",
+            3,
+            new BboxContinuityEvidence(0f, 0f, 1f, 0f, "ok"),
+            new android.graphics.RectF(100, 100, 180, 280));
+    guard.update(
+        1, 4, 1200, 1200, 1, 1, true, true,
+        evidence(1, 4, 1200, 4, .82f, 0f, true), true, continuity, true);
+    guard.update(
+        1, 5, 1500, 1500, 1, 1, true, true,
+        evidence(1, 5, 1500, 5, .82f, 0f, true), true, continuity, true);
+    guard.update(
+        1, 6, 1800, 1800, 1, 1, true, true,
+        evidence(1, 6, 1800, 6, .82f, 0f, true), true, continuity, true);
+    guard.update(
+        1, 7, 2100, 2100, 1, 1, true, true,
+        evidence(1, 7, 2100, 7, .82f, 0f, true), true, continuity, true);
+    SimulatorIdentityGuard.Decision waiting =
+        guard.update(
+            1, 8, 2301, 2301, 1, 1, true, true,
+            evidence(1, 8, 2301, 8, .82f, 0f, true), true, continuity, true);
+    assertEquals("multi_check_timeout", waiting.reason);
+    assertTrue(waiting.retainTarget);
+    assertFalse(waiting.motionAllowed);
+    SimulatorIdentityGuard.Decision resumed =
+        guard.update(
+            1, 9, 2400, 2400, 1, 1, true, true,
+            evidence(1, 9, 2400, 9, .82f, 0f, true), false, continuity, true);
+    assertTrue(resumed.motionAllowed);
+    assertEquals(SimulatorIdentityGuard.State.TRACK_STABLE, resumed.state);
+  }
+
+  @Test
+  public void independentLocalGeometrySurvivesOneTrackerBboxJump() {
+    SimulatorIdentityGuard guard = new SimulatorIdentityGuard();
+    guard.begin(1);
+    for (int i = 1; i <= 3; i++) continuous(guard, i, i * 300, .99f);
+    SimulatorIdentityGuard.Decision decision =
+        guard.update(
+            1,
+            4,
+            1200,
+            1200,
+            1,
+            1,
+            true,
+            true,
+            evidence(1, 4, 1200, 4, .55f, 0f, true),
+            false,
+            new SimulatorContinuityTracker.Evidence(
+                false,
+                "bbox_jump",
+                0,
+                new BboxContinuityEvidence(0.05f, 0.04f, 1.05f, 0.02f, "identity_local"),
+                new android.graphics.RectF(102, 100, 182, 280)),
+            true);
+    assertEquals(SimulatorIdentityGuard.State.TRACK_STABLE, decision.state);
+    assertTrue(decision.retainTarget);
+  }
+
+  @Test
+  public void globalMediumFreshScoresPauseWithoutErasingStrongProgress() {
+    guard.begin(1);
+    assertEquals(1, global(2, 1, 300).freshMatches);
+    SimulatorIdentityGuard.Decision medium =
+        global(2, 2, 600, false, 1, false, evidence(2, 2, 600, 2, .75f, .10f, true));
+    assertEquals(1, medium.freshMatches);
+    assertEquals("global_reid_medium_hold", medium.reason);
+    assertFalse(medium.motionAllowed);
+    assertEquals(2, global(2, 3, 900).freshMatches);
+    assertEquals(3, global(2, 4, 1200).freshMatches);
+    assertEquals(4, global(2, 5, 1500).freshMatches);
+    assertTrue(global(2, 6, 1800).authorized);
+  }
+
+  @Test
+  public void globalCachedScoresNeitherCountNorClearWithinEvidenceGap() {
+    guard.begin(1);
+    assertEquals(1, global(2, 1, 300).freshMatches);
+    SimulatorIdentityGuard.Decision cached =
+        global(2, 2, 600, false, 1, false, evidence(2, 1, 300, 1, .97f, .10f, false));
+    assertEquals(1, cached.freshMatches);
+    assertFalse(cached.motionAllowed);
+    assertEquals(2, global(2, 3, 700).freshMatches);
+  }
+
+  @Test
+  public void twoFreshLowScoresClearGlobalWindow() {
+    guard.begin(1);
+    assertEquals(1, global(2, 1, 300).freshMatches);
+    SimulatorIdentityGuard.Decision firstLow =
+        global(2, 2, 600, false, 1, false, evidence(2, 2, 600, 2, .65f, .10f, true));
+    assertEquals(1, firstLow.freshMatches);
+    assertEquals("global_reid_low_hold", firstLow.reason);
+    SimulatorIdentityGuard.Decision secondLow =
+        global(2, 3, 900, false, 1, false, evidence(2, 3, 900, 3, .60f, .10f, true));
+    assertEquals(0, secondLow.freshMatches);
+    assertEquals("global_reid_low_reset", secondLow.reason);
+    assertEquals(1, global(2, 4, 1200).freshMatches);
+  }
+
+  @Test
+  public void globalVerificationWindowRestartsAfterTwoSecondsEvenWithMediumEvidence() {
+    guard.begin(1);
+    global(2, 1, 100);
+    global(2, 2, 500);
+    global(2, 3, 900);
+    global(2, 4, 1300);
+    SimulatorIdentityGuard.Decision medium =
+        global(2, 5, 1700, false, 1, false, evidence(2, 5, 1700, 5, .75f, .10f, true));
+    assertEquals(4, medium.freshMatches);
+    SimulatorIdentityGuard.Decision restarted = global(2, 6, 2101);
+    assertFalse(restarted.authorized);
+    assertEquals(1, restarted.freshMatches);
+    assertEquals(0L, restarted.recoverySpanMs);
+  }
+
+  @Test
   public void cachesNeverCountOrBridgeAnExpiredFreshGap() {
     guard.begin(1);
     global(2, 1, 100);

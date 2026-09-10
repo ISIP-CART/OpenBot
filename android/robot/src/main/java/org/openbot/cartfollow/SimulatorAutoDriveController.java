@@ -6,6 +6,7 @@ public final class SimulatorAutoDriveController {
     IDLE,
     CAPTURE,
     WAIT_CONFIRM,
+    INITIALIZATION_REVERSE,
     REACQUIRE,
     COUNTDOWN,
     FOLLOW,
@@ -85,6 +86,30 @@ public final class SimulatorAutoDriveController {
   }
 
   public Result update(FollowStateMachine.FrameResult frame, long nowMs) {
+    if (frame != null && frame.state == FollowState.AUTO_POSITIONING) {
+      if (frame.frameTiming == null || nowMs < frame.frameTiming.receivedAtMs
+          || nowMs - frame.frameTiming.receivedAtMs > RealCartSafetyController.INFERENCE_TIMEOUT_MS)
+        return stopped(Phase.WAIT_CONFIRM, "positioning_frame_stale", false, 0L);
+      boolean reverse = frame.behaviorDecision != null
+          && frame.behaviorDecision.selectedAction == BehaviorAction.INITIALIZATION_REVERSE;
+      InitializationPositioningEvidence evidence = frame.initializationPositioningEvidence;
+      return reverse
+          ? new Result(
+              Phase.INITIALIZATION_REVERSE,
+              InitializationPositioningController.REVERSE_GEAR,
+              -InitializationPositioningController.REVERSE_GEAR,
+              -InitializationPositioningController.REVERSE_GEAR,
+              frame.behaviorDecision.actionReason,
+              false,
+              evidence == null ? 0L : evidence.reverseElapsedMs,
+              InitializationPositioningController.REVERSE_LIMIT_MS)
+          : stopped(
+              Phase.WAIT_CONFIRM,
+              frame.behaviorDecision == null
+                  ? "positioning_decision_missing" : frame.behaviorDecision.actionReason,
+              false,
+              evidence == null ? 0L : evidence.reverseElapsedMs);
+    }
     if(frame!=null && frame.r3Telemetry!=null) {
       shopping.environment(frame.r3Telemetry,frame.shoppingHeading,frame.shoppingGyroFresh,frame.shoppingSides45);
       if(shopping.enabled()) {
@@ -173,6 +198,8 @@ public final class SimulatorAutoDriveController {
         return stopped(Phase.CAPTURE, "collecting_target", false, 0L);
       case LOCKED_PENDING_CONFIRM:
         return stopped(Phase.WAIT_CONFIRM, "waiting_confirmation", false, 0L);
+      case AUTO_POSITIONING:
+        return stopped(Phase.WAIT_CONFIRM, "automatic_positioning", false, 0L);
       case DISTANCE_CALIBRATION:
         return stopped(Phase.WAIT_CONFIRM, "distance_calibration", false, 0L);
       case CONFIRMED_ARMED:
@@ -285,6 +312,8 @@ public final class SimulatorAutoDriveController {
       case CAPTURE_TARGET:
         return Phase.CAPTURE;
       case LOCKED_PENDING_CONFIRM:
+        return Phase.WAIT_CONFIRM;
+      case AUTO_POSITIONING:
         return Phase.WAIT_CONFIRM;
       case DISTANCE_CALIBRATION:
         return Phase.WAIT_CONFIRM;

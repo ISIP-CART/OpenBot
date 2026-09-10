@@ -16,6 +16,7 @@ import org.openbot.cartfollow.GalleryCropGeometry;
 import org.openbot.cartfollow.GalleryUpdateStatus;
 import org.openbot.cartfollow.IdentityCandidateSet;
 import org.openbot.cartfollow.IdentityEvidence;
+import org.openbot.cartfollow.InitializationPositioningEvidence;
 import org.openbot.cartfollow.ReIDMatchResult;
 import org.openbot.cartfollow.RealCartAutoDriveController;
 import org.openbot.cartfollow.RecentGallery;
@@ -63,6 +64,7 @@ public class CartFollowDiagnosticSaver {
       int initializationSamples,
       int initializationTrackId,
       String initializationDiscardReason,
+      InitializationPositioningEvidence positioning,
       int distanceCalibrationSamples,
       long distanceCalibrationCompletedAtMs,
       RangeTelemetrySnapshot rangeTelemetry,
@@ -168,6 +170,7 @@ public class CartFollowDiagnosticSaver {
               initializationSamples,
               initializationTrackId,
               initializationDiscardReason,
+              positioning,
               distanceCalibrationSamples,
               distanceCalibrationCompletedAtMs,
               rangeTelemetry,
@@ -292,6 +295,7 @@ public class CartFollowDiagnosticSaver {
       int initializationSamples,
       int initializationTrackId,
       String initializationDiscardReason,
+      InitializationPositioningEvidence positioning,
       int distanceCalibrationSamples,
       long distanceCalibrationCompletedAtMs,
       RangeTelemetrySnapshot rangeTelemetry,
@@ -388,6 +392,7 @@ public class CartFollowDiagnosticSaver {
                 csv(initializationDiscardReason),
                 distanceCalibrationSamples,
                 distanceCalibrationCompletedAtMs)
+            + positioningColumns(positioning, realDrive, timestampMs)
             + rangeColumns(rangeTelemetry, rangeFresh, rangeGateReason)
             + "\n";
     session.io.append(session.frameLogCsv, row);
@@ -405,6 +410,35 @@ public class CartFollowDiagnosticSaver {
         fresh ? 1 : 0,
         csv(gateReason),
         csv(telemetry.lastFirmwareError)) + "," + telemetry.firmwareErrorAtMs;
+  }
+
+  static String positioningColumns(
+      InitializationPositioningEvidence evidence,
+      RealCartAutoDriveController.Result realDrive,
+      long timestampMs) {
+    if (evidence == null) return ",,-1,0,0,0,0,0,,0,0,0,0,0,0,,,-1,0,0,0,0,-1,-1";
+    RectF box = evidence.screenBox;
+    String screenBox = box == null ? ""
+        : String.format(Locale.US, "%.4f|%.4f|%.4f|%.4f", box.left, box.top, box.right, box.bottom);
+    long stopLatency = evidence.fullBodyObservedAtMs >= 0L && realDrive != null && realDrive.isStop()
+        ? Math.max(0L, timestampMs - evidence.fullBodyObservedAtMs) : -1L;
+    String columns = String.format(
+        Locale.US,
+        ",%s,%d,%d,%d,%.4f,%.4f,%.4f,%s,%d,%d,%d,%d,%d,%d,%s,%d,%d",
+        csv(evidence.phase.name()), evidence.trackId, evidence.stableFrames, evidence.stableSpanMs,
+        evidence.centerSpanX, evidence.centerSpanY, evidence.sizeVariation, csv(screenBox),
+        evidence.clippedLeft ? 1 : 0, evidence.clippedTop ? 1 : 0,
+        evidence.clippedRight ? 1 : 0, evidence.clippedBottom ? 1 : 0,
+        evidence.fullBody() ? 1 : 0, evidence.reverseElapsedMs, csv(evidence.reason),
+        evidence.fullBodyObservedAtMs, stopLatency);
+    return columns + String.format(
+        Locale.US, ",%.4f,%.4f,%.4f,%.4f,%d,%d",
+        box == null ? 0f : box.left,
+        box == null ? 0f : box.top,
+        box == null ? 0f : 1f - box.right,
+        box == null ? 0f : 1f - box.bottom,
+        evidence.reverseStartedAtMs,
+        evidence.reverseEndedAtMs);
   }
 
   static String trackingColumns(org.openbot.cartfollow.TrackingDecision tracking) {

@@ -10,6 +10,8 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import timber.log.Timber;
 
 /** Writes small, image-free steering calibration records outside the diagnostics image directory. */
@@ -19,6 +21,7 @@ final class SteeringTuningRecorder {
 
   private final Context context;
   private final ExecutorService writer = Executors.newSingleThreadExecutor();
+  private final AtomicBoolean closed = new AtomicBoolean(false);
 
   SteeringTuningRecorder(Context context) {
     this.context = context.getApplicationContext();
@@ -29,12 +32,14 @@ final class SteeringTuningRecorder {
       int strengthPercent,
       RealCartAutoDriveController.Result result,
       String note) {
+    if (closed.get()) return;
     final int demand = result == null ? 0 : result.demandPercent;
     final int left = result == null ? 0 : result.left;
     final int right = result == null ? 0 : result.right;
     final String phase = result == null ? "NONE" : result.phase.name();
-    writer.execute(
-        () -> {
+    try {
+      writer.execute(
+          () -> {
           File file = historyFile();
           if (file == null) return;
           boolean newFile = !file.exists();
@@ -62,11 +67,19 @@ final class SteeringTuningRecorder {
           } catch (IOException e) {
             Timber.e(e, "Failed to write steering tuning history.");
           }
-        });
+          });
+    } catch (RejectedExecutionException error) {
+      // A window-focus callback can arrive while a Fragment view is being torn down.
+      Timber.w(error, "Ignoring steering tuning record after shutdown.");
+    }
   }
 
   void shutdown() {
-    writer.shutdown();
+    if (closed.compareAndSet(false, true)) writer.shutdown();
+  }
+
+  boolean isClosedForTest() {
+    return closed.get();
   }
 
   private File historyFile() {

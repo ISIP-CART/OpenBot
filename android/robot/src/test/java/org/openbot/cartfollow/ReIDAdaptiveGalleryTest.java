@@ -1,6 +1,6 @@
 package org.openbot.cartfollow;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.*;
 
 import android.graphics.Bitmap;
 import android.graphics.RectF;
@@ -46,6 +46,41 @@ public class ReIDAdaptiveGalleryTest {
     assertEquals(0, result.pendingConfirmations);
     assertEquals(0, result.adaptiveSize);
     assertEquals("static_mode", result.reason);
+  }
+
+  @Test
+  public void initializationSupplementAcceptsOnlyExactTrackAndSessionWithoutSimilarityGate() {
+    QueueExtractor extractor = new QueueExtractor();
+    for (int i = 0; i < 12; i++) extractor.add(1f, 0f);
+    extractor.add(0.2f, 0.98f);
+    ReIDCoordinator coordinator = initialized(extractor, GalleryUpdateStatus.Mode.ADAPTIVE);
+    Bitmap frame = Bitmap.createBitmap(100, 200, Bitmap.Config.ARGB_8888);
+    long now = SystemClock.elapsedRealtime();
+    long session = coordinator.getSessionEpoch();
+    ReIDCoordinator.InitializationSampleResult wrong =
+        coordinator.collectConfirmedInitializationCandidate(
+            frame, person(), 0, 2, 1, now, 20, session);
+    assertFalse(wrong.accepted);
+    assertEquals("confirmed_track_mismatch", wrong.reason);
+    ReIDCoordinator.InitializationSampleResult accepted =
+        coordinator.collectConfirmedInitializationCandidate(
+            frame, person(), 0, 1, 1, now, 21, session);
+    assertTrue(accepted.accepted);
+    assertEquals(1, accepted.sampleCount);
+    assertEquals(9, coordinator.getGallerySize());
+    assertTrue(coordinator.provenanceManifest().get(0).contains("initialization_continuity"));
+    ReIDCoordinator.InitializationSampleResult duplicate =
+        coordinator.collectConfirmedInitializationCandidate(
+            frame, person(), 0, 1, 1, now, 21, session);
+    assertFalse(duplicate.accepted);
+    assertEquals("duplicate_frame", duplicate.reason);
+    coordinator.closeInitializationSupplement();
+    assertEquals(
+        "sampling_closed",
+        coordinator
+            .collectConfirmedInitializationCandidate(frame, person(), 0, 1, 1, now, 22, session)
+            .reason);
+    frame.recycle();
   }
 
   @Test

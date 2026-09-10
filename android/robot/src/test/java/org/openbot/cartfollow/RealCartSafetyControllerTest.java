@@ -87,6 +87,28 @@ public class RealCartSafetyControllerTest {
   }
 
   @Test
+  public void initializationReverseUsesFixedGearAndSchedulerStopsItOnNewDecision() {
+    RealCartSafetyController controller = readyAutoController();
+    assertTrue(controller.unlockAuto());
+    controller.setAutoRunEnabled(true, 900L);
+    FollowStateMachine.FrameResult frame = new FollowStateMachine.FrameResult(
+        FollowState.AUTO_POSITIONING, new Control(0, 0), null, null,
+        new ArrayList<>(), false, false, null, -1);
+    frame.behaviorDecision = new BehaviorDecisionResult(
+        FollowState.AUTO_POSITIONING, BehaviorAction.INITIALIZATION_REVERSE,
+        "stable_start_reverse", null, 1f);
+    RealCartSafetyController.Output reverse = observe(controller, frame, 1000L);
+    assertEquals(-8, reverse.left);
+    assertEquals(-8, reverse.right);
+    assertEquals(-8, controller.refresh(1100L, null).left);
+
+    frame.behaviorDecision = new BehaviorDecisionResult(
+        FollowState.AUTO_POSITIONING, BehaviorAction.MOTION_STOP, "full_body_stop", null, 0f);
+    RealCartSafetyController.Output stopped = observe(controller, frame, 1150L);
+    assertTrue(stopped.isStop());
+  }
+
+  @Test
   public void autoOutputUsesBoundedRealCartCommands() {
     RealCartSafetyController controller = readyAutoController();
     assertTrue(controller.unlockAuto());

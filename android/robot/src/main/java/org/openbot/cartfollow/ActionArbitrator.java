@@ -24,6 +24,20 @@ public class ActionArbitrator {
       TargetMemory memory,
       int frameW,
       SimulatorIdentityGuard.Decision simulatorPermit) {
+    return decide(state, identity, distance, traversability, safety, memory, frameW,
+        simulatorPermit, null);
+  }
+
+  public BehaviorDecisionResult decide(
+      FollowState state,
+      IdentityEvidence identity,
+      DistanceEvidence distance,
+      TraversabilityEvidence traversability,
+      SystemSafetyEvidence safety,
+      TargetMemory memory,
+      int frameW,
+      SimulatorIdentityGuard.Decision simulatorPermit,
+      InitializationPositioningEvidence positioning) {
     if (safety != null && safety.emergencyStop) {
       return result(state, BehaviorAction.EMERGENCY_STOP, "emergency_stop", safety.reason, 0f);
     }
@@ -32,6 +46,14 @@ public class ActionArbitrator {
     }
     if (state == FollowState.STOP) {
       return result(state, BehaviorAction.HARD_STOP, "state_stop", "hard_stop_state", 0f);
+    }
+    if (state == FollowState.AUTO_POSITIONING) {
+      if (positioning != null && positioning.shouldReverse())
+        return result(state, BehaviorAction.INITIALIZATION_REVERSE,
+            positioning.reason, null, 1f);
+      return result(state, BehaviorAction.MOTION_STOP,
+          positioning == null ? "positioning_evidence_missing" : positioning.reason,
+          "motion_stop", 0f);
     }
     if (state == FollowState.REACQUIRE_TARGET) {
       float conf = identity == null ? 0f : identity.confidence;

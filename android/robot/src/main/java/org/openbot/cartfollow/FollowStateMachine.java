@@ -15,12 +15,22 @@ public class FollowStateMachine {
     public final Recognition candidate;
     public final int trackId;
     public final boolean uniqueHighConfidence;
+    public final boolean associationCompeting;
 
     public InitializationObservation(
-        Recognition candidate, int trackId, boolean uniqueHighConfidence) {
+      Recognition candidate, int trackId, boolean uniqueHighConfidence) {
+      this(candidate, trackId, uniqueHighConfidence, false);
+    }
+
+    public InitializationObservation(
+        Recognition candidate,
+        int trackId,
+        boolean uniqueHighConfidence,
+        boolean associationCompeting) {
       this.candidate = candidate;
       this.trackId = trackId;
       this.uniqueHighConfidence = uniqueHighConfidence;
+      this.associationCompeting = associationCompeting;
     }
   }
 
@@ -67,6 +77,14 @@ public class FollowStateMachine {
     public boolean shoppingGyroFresh, shoppingSides45;
     public boolean rangeFresh;
     public String rangeGateReason = "";
+    public InitializationPositioningEvidence initializationPositioningEvidence;
+    public boolean initializationContinuityValid;
+    public boolean initializationContinuityAccepted;
+    public int initializationContinuityTrackId = -1;
+    public int initializationContinuityFrames;
+    public String initializationContinuityReason = "";
+    public int initializationGallerySampleCount;
+    public String initializationGalleryReason = "not_attempted";
 
     public FrameResult(
         FollowState state,
@@ -110,6 +128,8 @@ public class FollowStateMachine {
   private final TargetMatcher matcher;
   private final ControlGenerator controlGenerator;
   private final TargetMemory memory = new TargetMemory();
+  private final InitializationPositioningController positioning =
+      new InitializationPositioningController();
 
   private FollowState state = FollowState.IDLE;
   private int captureCount = 0;
@@ -131,6 +151,13 @@ public class FollowStateMachine {
   private int recoveryFreshReidCount;
   private long lastRecoveryObservationId = -1L;
   private int recoveryTrackId = -1;
+  private long calibrationClippedSinceMs = -1L;
+  private boolean initializationContinuityValid;
+  private int initializationContinuityTrackId = -1;
+  private int initializationContinuityFrames;
+  private long initializationContinuityLastAtMs = -1L;
+  private RectF initializationContinuityBox;
+  private String initializationContinuityReason = "not_started";
 
   public FollowStateMachine(TargetMatcher matcher, ControlGenerator controlGenerator) {
     this.matcher = matcher;
@@ -209,6 +236,9 @@ public class FollowStateMachine {
       captureCount = 0;
       resetCaptureWindow("capture_started");
       confirmedTrackId = -1;
+      positioning.reset();
+      calibrationClippedSinceMs = -1L;
+      resetInitializationContinuity("capture_started");
       hasFollowedInSession = false;
       resetRecoveryFreshEvidence();
       resetEvidenceCounters();
@@ -224,7 +254,16 @@ public class FollowStateMachine {
     if (state == FollowState.LOCKED_PENDING_CONFIRM) {
       confirmedTrackId = lockedTrackId;
       memory.resetDistanceCalibration();
-      state = FollowState.DISTANCE_CALIBRATION;
+      positioning.reset();
+      calibrationClippedSinceMs = -1L;
+      initializationContinuityValid = lockedTrackId >= 0;
+      initializationContinuityTrackId = lockedTrackId;
+      initializationContinuityFrames = 0;
+      initializationContinuityLastAtMs = -1L;
+      initializationContinuityBox = null;
+      initializationContinuityReason =
+          initializationContinuityValid ? "confirmed_track_bound" : "confirmed_track_missing";
+      state = FollowState.AUTO_POSITIONING;
       matchCount = 0;
     }
   }
@@ -236,6 +275,9 @@ public class FollowStateMachine {
       captureCount = 0;
       resetCaptureWindow("retake");
       confirmedTrackId = -1;
+      positioning.reset();
+      calibrationClippedSinceMs = -1L;
+      resetInitializationContinuity("retake");
       state = FollowState.CAPTURE_TARGET;
     }
   }
@@ -246,6 +288,9 @@ public class FollowStateMachine {
     captureCount = 0;
     resetCaptureWindow("cancelled");
     confirmedTrackId = -1;
+    positioning.reset();
+    calibrationClippedSinceMs = -1L;
+    resetInitializationContinuity("cancelled");
     matchCount = 0;
     lostCount = 0;
     resetEvidenceCounters();
@@ -431,8 +476,52 @@ public class FollowStateMachine {
             snapshot,
             -1);
 
+      case AUTO_POSITIONING:
+        {
+          observeInitializationContinuity(initialization, frameW, frameH, now);
+          // Test/import tooling may restore an already-complete reference sample window.
+          if (memory.completeDistanceCalibration(now)) {
+            boolean accepted = initializationContinuityValid && initializationContinuityFrames >= 3;
+            state = accepted ? FollowState.READY_TO_FOLLOW : FollowState.CONFIRMED_ARMED;
+            stateEnterTime = now;
+            initializationDiscardReason = accepted
+                ? "initialization_continuity_accepted" : "distance_calibration_restored";
+            FrameResult restored = new FrameResult(
+                state, new Control(0f, 0f), null, null, safePersons,
+                false, false, snapshot, -1);
+            restored.initializationContinuityAccepted = accepted;
+            fillInitializationContinuity(restored);
+            return restored;
+          }
+          Recognition cand =
+              initialization != null ? initialization.candidate : selectLargest(safePersons);
+          int trackId = initialization == null ? -1 : initialization.trackId;
+          boolean unique = initialization == null
+              ? safePersons.size() == 1 : initialization.uniqueHighConfidence;
+          InitializationPositioningEvidence evidence =
+              positioning.update(
+                  cand == null ? null : cand.getLocation(), trackId, unique, confirmedTrackId,
+                  frameW, frameH, sensorOrientation, now);
+          if (evidence.phase == InitializationPositioningEvidence.Phase.READY) {
+            memory.resetDistanceCalibration();
+            calibrationClippedSinceMs = -1L;
+            state = FollowState.DISTANCE_CALIBRATION;
+          } else if (evidence.phase == InitializationPositioningEvidence.Phase.TIMEOUT) {
+            state = FollowState.LOCKED_PENDING_CONFIRM;
+          }
+          FrameResult result =
+              new FrameResult(state, new Control(0f, 0f), cand, cand, safePersons,
+                  false, false, snapshot, -1);
+          result.initializationPositioningEvidence = evidence;
+          result.distanceDiagnosticText = positioningPrompt(evidence);
+          initializationDiscardReason = evidence.reason;
+          fillInitializationContinuity(result);
+          return result;
+        }
+
       case DISTANCE_CALIBRATION:
         {
+          observeInitializationContinuity(initialization, frameW, frameH, now);
           Recognition cand =
               initialization != null ? initialization.candidate : selectLargest(safePersons);
           int trackId = initialization == null ? -1 : initialization.trackId;
@@ -448,27 +537,55 @@ public class FollowStateMachine {
           else if (!unique) discard = "multiple_high_confidence_targets";
           boolean ready = false;
           if (discard == null) {
-            ready =
-                memory.offerDistanceCalibrationSample(
-                    cand.getLocation(), frameW, frameH, sensorOrientation, now);
-            if (!ready && memory.getDistanceCalibrationStatus().contains("裁切"))
+            InitializationFraming.Result framing =
+                InitializationFraming.evaluate(
+                    cand.getLocation(), frameW, frameH, sensorOrientation);
+            if (!framing.fullBody()) {
               discard = "person_clipped";
+              if (calibrationClippedSinceMs < 0L) calibrationClippedSinceMs = now;
+              if (now - calibrationClippedSinceMs >= 500L) {
+                memory.resetDistanceCalibration();
+                positioning.reset();
+                calibrationClippedSinceMs = -1L;
+                state = FollowState.AUTO_POSITIONING;
+                discard = "persistent_clipping_reposition";
+              }
+            } else {
+              calibrationClippedSinceMs = -1L;
+              ready =
+                  memory.offerDistanceCalibrationSample(
+                      cand.getLocation(), frameW, frameH, sensorOrientation, now);
+            }
+          } else {
+            calibrationClippedSinceMs = -1L;
           }
           initializationDiscardReason = discard == null ? "distance_sample_accepted" : discard;
           int samples = memory.getDistanceCalibrationSampleCount();
-          if (ready && memory.completeDistanceCalibration(now)) {
-            state = FollowState.CONFIRMED_ARMED;
-            initializationDiscardReason = "distance_calibration_completed";
+          if (state == FollowState.DISTANCE_CALIBRATION
+              && ready && memory.completeDistanceCalibration(now)) {
+            boolean accepted = initializationContinuityValid && initializationContinuityFrames >= 3;
+            state = accepted ? FollowState.READY_TO_FOLLOW : FollowState.CONFIRMED_ARMED;
+            stateEnterTime = now;
+            initializationDiscardReason = accepted
+                ? "initialization_continuity_accepted" : "distance_calibration_completed";
           }
           FrameResult result =
               new FrameResult(
                   state, new Control(0f, 0f), cand, cand, safePersons, false, false, snapshot, -1);
           result.distanceDiagnosticText =
-              state == FollowState.CONFIRMED_ARMED
-                  ? "视觉参考标定完成"
+              state == FollowState.AUTO_POSITIONING
+                  ? "人物框再次被裁切，重新自动取景"
+                   : state == FollowState.CONFIRMED_ARMED
+                       ? "视觉参考标定完成"
+                   : state == FollowState.READY_TO_FOLLOW
+                       ? "视觉参考标定完成，三秒后开始跟随"
                   : discard == null
                       ? "视觉参考标定 " + samples + "/" + TargetMemory.DISTANCE_CALIBRATION_SAMPLES
                       : calibrationPrompt(discard, samples);
+          result.initializationContinuityAccepted =
+              state == FollowState.READY_TO_FOLLOW
+                  && "initialization_continuity_accepted".equals(initializationDiscardReason);
+          fillInitializationContinuity(result);
           return result;
         }
 
@@ -521,12 +638,32 @@ public class FollowStateMachine {
 
       case READY_TO_FOLLOW:
         {
+          if (!hasFollowedInSession && initializationContinuityTrackId >= 0) {
+            observeInitializationContinuity(initialization, frameW, frameH, now);
+            if (!initializationContinuityValid) {
+              state = FollowState.CONFIRMED_ARMED;
+              initializationDiscardReason = initializationContinuityReason;
+              FrameResult interrupted =
+                  new FrameResult(
+                      state,
+                      new Control(0f, 0f),
+                      null,
+                      null,
+                      safePersons,
+                      false,
+                      false,
+                      snapshot,
+                      -1);
+              fillInitializationContinuity(interrupted);
+              return interrupted;
+            }
+          }
           int cd = (int) Math.ceil((COUNTDOWN_MS - (now - stateEnterTime)) / 1000.0);
           if (now - stateEnterTime >= COUNTDOWN_MS) {
             state = FollowState.FOLLOW;
             hasFollowedInSession = true;
             lostCount = 0;
-            return new FrameResult(
+            FrameResult following = new FrameResult(
                 FollowState.FOLLOW,
                 new Control(0f, 0f),
                 null,
@@ -536,6 +673,8 @@ public class FollowStateMachine {
                 false,
                 null,
                 -1);
+            fillInitializationContinuity(following);
+            return following;
           }
           TargetMatcher.MatchResult m =
               frameMatch != null
@@ -555,6 +694,7 @@ public class FollowStateMachine {
                   null,
                   Math.max(0, cd));
           fillIdentity(fr, id);
+          fillInitializationContinuity(fr);
           return fr;
         }
 
@@ -823,9 +963,95 @@ public class FollowStateMachine {
 
   private static String calibrationPrompt(String reason, int samples) {
     if ("person_clipped".equals(reason))
-      return "视觉参考标定 " + samples + "/" + TargetMemory.DISTANCE_CALIBRATION_SAMPLES + "，请后退并保持完整人物入镜";
+      return "视觉参考标定 " + samples + "/" + TargetMemory.DISTANCE_CALIBRATION_SAMPLES + "，取景抖动，暂停采样";
     if ("multiple_high_confidence_targets".equals(reason)) return "视觉参考标定暂停，请保持画面内只有已确认目标";
     return "视觉参考标定 " + samples + "/" + TargetMemory.DISTANCE_CALIBRATION_SAMPLES + "，等待已确认目标";
+  }
+
+  private void resetInitializationContinuity(String reason) {
+    initializationContinuityValid = false;
+    initializationContinuityTrackId = -1;
+    initializationContinuityFrames = 0;
+    initializationContinuityLastAtMs = -1L;
+    initializationContinuityBox = null;
+    initializationContinuityReason = reason;
+  }
+
+  private void observeInitializationContinuity(
+      InitializationObservation observation, int frameW, int frameH, long now) {
+    if (!initializationContinuityValid) return;
+    if (observation == null
+        || observation.candidate == null
+        || observation.candidate.getLocation() == null) {
+      invalidateInitializationContinuity("confirmed_target_missing");
+      return;
+    }
+    if (observation.associationCompeting) {
+      invalidateInitializationContinuity("association_competing");
+      return;
+    }
+    if (!observation.uniqueHighConfidence) {
+      invalidateInitializationContinuity("multiple_high_confidence_targets");
+      return;
+    }
+    if (observation.trackId < 0 || observation.trackId != initializationContinuityTrackId) {
+      invalidateInitializationContinuity("confirmed_track_changed");
+      return;
+    }
+    if (initializationContinuityLastAtMs >= 0L
+        && (now <= initializationContinuityLastAtMs
+            || now - initializationContinuityLastAtMs > 500L)) {
+      invalidateInitializationContinuity("initialization_observation_gap");
+      return;
+    }
+    RectF current = new RectF(observation.candidate.getLocation());
+    if (initializationContinuityBox != null) {
+      BboxContinuityEvidence geometry =
+          BboxContinuityEvidence.from(
+              current, initializationContinuityBox, null, frameW, frameH);
+      if (!geometry.bboxDefaultOk) {
+        invalidateInitializationContinuity("initialization_bbox_jump");
+        return;
+      }
+    }
+    initializationContinuityBox = current;
+    initializationContinuityLastAtMs = now;
+    initializationContinuityFrames = Math.min(3, initializationContinuityFrames + 1);
+    initializationContinuityReason =
+        initializationContinuityFrames >= 3
+            ? "initialization_track_continuous"
+            : "initialization_track_warming";
+  }
+
+  private void invalidateInitializationContinuity(String reason) {
+    initializationContinuityValid = false;
+    initializationContinuityFrames = 0;
+    initializationContinuityLastAtMs = -1L;
+    initializationContinuityBox = null;
+    initializationContinuityReason = reason;
+  }
+
+  private void fillInitializationContinuity(FrameResult result) {
+    if (result == null) return;
+    result.initializationContinuityValid = initializationContinuityValid;
+    result.initializationContinuityTrackId = initializationContinuityTrackId;
+    result.initializationContinuityFrames = initializationContinuityFrames;
+    result.initializationContinuityReason = initializationContinuityReason;
+  }
+
+  private static String positioningPrompt(InitializationPositioningEvidence evidence) {
+    switch (evidence.phase) {
+      case REVERSING:
+        return "正在自动后退取景";
+      case SETTLING:
+      case READY:
+        return "全身已入镜，正在停车并完成初始化";
+      case TIMEOUT:
+        return "自动后退超时，请调整站位后重新确认或重拍";
+      case WAIT_STABLE:
+      default:
+        return "请保持站立";
+    }
   }
 
   public int getInitializationSampleCount() {

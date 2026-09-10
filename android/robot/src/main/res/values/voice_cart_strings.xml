@@ -2,15 +2,26 @@
 <resources>
     <string name="voice_cart_title">Voice Cart Simulator</string>
     <string name="voice_cart_welcome">你好，欢迎使用语音购物车模拟器。打开开始开关后，我会引导你完成初始化。</string>
+    <string name="shopping_cart_welcome_disconnected">欢迎使用 ShoppingCart，请先连接蓝牙。连接成功并准备完成后，点击 Start 开始跟随。</string>
+    <string name="shopping_cart_welcome_connected">小车已连接，准备完成后点击 Start 开始跟随。</string>
     <string name="voice_cart_capture">请走到镜头前，画面中只保留你一个人，并保持站立。</string>
     <string name="voice_cart_confirm">已经采集到你的外观。请在手机上确认照片。</string>
-    <string name="voice_cart_calibration">已确认。请回到镜头前，保持完整人物入镜，记录当前视觉参考距离。近距离设置将在测距接入后提供。</string>
-    <string name="voice_cart_clipped">视觉参考标定需要完整人物入镜，请后退一点并保持站立。</string>
+    <string name="voice_cart_positioning">已确认，请保持站立。小车会自动调整距离，让全身进入画面。</string>
+    <string name="shopping_cart_auto_positioning">目标采集完成，请保持站立。小车将自动调整距离。</string>
+    <string name="voice_cart_positioning_reverse">正在自动后退取景，请继续保持站立。</string>
+    <string name="voice_cart_positioning_interrupted">已经停止后退。请保持站立，并确保画面中只有你一人。</string>
+    <string name="voice_cart_positioning_timeout">取景未完成，请调整站位后重新确认。</string>
+    <string name="shopping_cart_auto_positioning_timeout">取景未完成，小车已经停止。请调整站位后重新点击 Start。</string>
+    <string name="voice_cart_calibration">全身已进入画面，正在停车并完成初始化。</string>
+    <string name="voice_cart_clipped">取景暂时不完整，已暂停视觉参考采样。</string>
     <string name="voice_cart_reacquire">正在确认目标，请回到镜头前稍等。</string>
-    <string name="voice_cart_countdown">准备开始低速跟随，三秒后启动。</string>
+    <string name="voice_cart_countdown">三秒后开始跟随。</string>
     <string name="voice_cart_follow">开始低速跟随。</string>
     <string name="voice_cart_identity_uncertain">我暂时无法确认你的身份，已停止前进。请回到镜头前。</string>
     <string name="voice_cart_lost">暂时没有看到你，已停止前进。请回到镜头前。</string>
     <string name="voice_cart_search">正在原地低速搜索，请回到镜头前。</string>
     <string name="voice_cart_stopped">没有重新找到你，已经停止。请重新开始跟随。</string>
+    <string name="voice_cart_emergency">急停已触发。请重启小车并重新连接后再开始。</string>
+    <string name="voice_cart_disconnected">蓝牙连接已断开，小车已经停止。</string>
+    <string name="voice_cart_user_stop">跟随已停止。</string>
 </resources>

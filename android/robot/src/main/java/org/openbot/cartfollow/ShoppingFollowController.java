@@ -5,8 +5,8 @@ import org.openbot.vehicle.R3TelemetrySession;
 
 /** Shared close-follow and finite shelf exploration policy; all distances are sensor-origin mm. */
 public final class ShoppingFollowController {
-  public static final String VERSION = "shopping-visible-range-v2";
-  public static final float WIDTH_START = .45f, WIDTH_STOP = .55f;
+  public static final String VERSION = "shopping-close-return-v4";
+  public static final float WIDTH_START = .55f, WIDTH_STOP = .65f;
   public static final int FRONT_STOP = 300, FRONT_CLEAR = 400, SIDE_STOP = 250;
   public static final int SIDE_CLEAR = 350;
   public static final long EVIDENCE_TIMEOUT_MS = 400;
@@ -20,17 +20,20 @@ public final class ShoppingFollowController {
   }
   private R3TelemetrySession.Status range;
   private boolean enabled, angled, yawFresh, frontLatched, widthStopped, forward;
-  private float heading, width, previousWidth, wallBaseline, wallHeading, startHeading;
+  private float heading, width, previousWidth, rawWidth, wallBaseline, wallHeading, startHeading;
   private long lastFrame=-1, lastSeen=-1, started=-1, deadline, nextAfter, lastRange=-1;
   private long wallAt=-1, widthHoldUntil, decisionRange=-1, candidateAt=-1;
   private int frontClearCount, wallSamples, outwardCount, turn, targetTrack=-1, seenTrack=-1, stableFrames;
+  private int handoffTrack=-1, handoffFrames;
   private int strength=100, maximumGear=21, gear=0, upFrames, pendingGear;
   private boolean opening, inside, unknownEdge, hasAdvanced;
   private long visibleForwardAt=-1, lastCameraAt=-1, lastDecisionAt=-1;
   private int lastFrontCap=21;
+  private int lastDesiredGear, lastIdentityCap=21, lastEdgeCap=21, lastCautionCap=21, lastFinalGear;
   private final boolean[] sideLatched = new boolean[2];
   private final int[] sideClearCount = new int[2];
   private String rangeMode="idle";
+  private String lastGearResetReason="none";
   private Phase phase=Phase.FOLLOW;
   private Output output=new Output(0,0,"shopping_idle");
   private final TargetAimController aim = new TargetAimController();
@@ -40,14 +43,19 @@ public final class ShoppingFollowController {
     if (r != null && r.advertised) enabled=true;
   }
   public synchronized boolean enabled() { return enabled; }
-  public synchronized boolean learningRisk() { return exploring() || width>=.45f; }
+  public synchronized boolean learningRisk() { return exploring() || width>=WIDTH_STOP; }
   public synchronized boolean exploring() { return phase != Phase.FOLLOW && phase != Phase.PARKED; }
   public synchronized String diagnostic() {
     R3Snapshot s=snapshot();
     String sensors=s==null ? ";r3_snapshot=none" : ";r3_seq="+s.sequence+";r3_received_ms="+s.receivedAtMs
         +readingDiagnostic("L",s.left,s,lastDecisionAt)+readingDiagnostic("C",s.center,s,lastDecisionAt)
         +readingDiagnostic("R",s.right,s,lastDecisionAt);
-    return "strategy="+VERSION+";phase="+phase+";width="+width+";side45="+angled
+    return "strategy="+VERSION+";phase="+phase+";raw_width="+rawWidth+";smooth_width="+width
+        +";width_start="+WIDTH_START+";width_stop="+WIDTH_STOP+";width_stopped="+widthStopped
+        +";desired_gear="+lastDesiredGear+";edge_cap="+lastEdgeCap+";identity_cap="+lastIdentityCap
+        +";caution_cap="+lastCautionCap+";front_cap="+lastFrontCap+";configured_cap="+maximumGear+";final_gear="+lastFinalGear
+        +";gear_reset_reason="+lastGearResetReason+";handoff_track="+handoffTrack
+        +";handoff_frames="+handoffFrames+";side45="+angled
         +";wall="+wallBaseline+";opening="+opening+";inside="+inside+";direction="+turn
         +";heading="+heading+";range_mode="+rangeMode+";front_latched="+frontLatched
         +";front_clear_samples="+frontClearCount+";last_front_cap="+lastFrontCap
@@ -63,14 +71,19 @@ public final class ShoppingFollowController {
   public synchronized void tuning(int savedStrength, int maxGear) { strength=savedStrength; maximumGear=maxGear; }
   public synchronized void reset() {
     enabled=false; hasAdvanced=false; range=null; phase=Phase.FOLLOW; frontLatched=widthStopped=forward=false;
-    width=previousWidth=wallBaseline=0; lastFrame=lastSeen=lastRange=wallAt=started=-1;
+    width=previousWidth=rawWidth=wallBaseline=0; lastFrame=lastSeen=lastRange=wallAt=started=-1;
     frontClearCount=wallSamples=outwardCount=turn=stableFrames=gear=upFrames=pendingGear=0;
-    targetTrack=seenTrack=-1; decisionRange=candidateAt=-1; opening=inside=unknownEdge=false; widthHoldUntil=0; aim.reset();
-    visibleForwardAt=lastCameraAt=lastDecisionAt=-1; lastFrontCap=21; rangeMode="idle";
+    targetTrack=seenTrack=handoffTrack=-1; handoffFrames=0; decisionRange=candidateAt=-1; opening=inside=unknownEdge=false; widthHoldUntil=0; aim.reset();
+    visibleForwardAt=lastCameraAt=lastDecisionAt=-1; lastFrontCap=lastIdentityCap=lastEdgeCap=lastCautionCap=21;
+    lastDesiredGear=lastFinalGear=0; lastGearResetReason="reset"; rangeMode="idle";
     sideLatched[0]=sideLatched[1]=false; sideClearCount[0]=sideClearCount[1]=0;
     output=new Output(0,0,"shopping_reset");
   }
-  private Output stop(String why) { forward=false; gear=0; visibleForwardAt=-1; rangeMode="stopped"; return output=new Output(0,0,why); }
+  private Output stop(String why) {
+    if (gear != 0 || upFrames != 0 || pendingGear != 0) lastGearResetReason=why;
+    forward=false; gear=upFrames=pendingGear=lastFinalGear=0; visibleForwardAt=-1; rangeMode="stopped";
+    return output=new Output(0,0,why);
+  }
   private Output park(String why) { phase=Phase.PARKED; return stop(why); }
   private R3Snapshot snapshot() { return range == null ? null : range.snapshot; }
   private boolean usable(R3Snapshot.Reading r, long now) {
@@ -107,7 +120,11 @@ public final class ShoppingFollowController {
   }
   private boolean sensorFault() {
     R3Snapshot s=snapshot();
-    return s!=null && (s.left.status>=4 || s.center.status>=4 || s.right.status>=4);
+    // Only an explicit bus/acquisition failure is a hard sensor fault. Signal/range invalid,
+    // stale-with-a-fresh-snapshot, and not-present provide no obstacle evidence. Visible target
+    // following may continue under the existing near-obstacle latch; blind corner exploration
+    // still requires usable readings below.
+    return s!=null && (s.left.status==4 || s.center.status==4 || s.right.status==4);
   }
   private boolean visibleForward(long now) {
     return phase==Phase.FOLLOW && visibleForwardAt>=0 && now>=visibleForwardAt
@@ -125,14 +142,17 @@ public final class ShoppingFollowController {
   }
   private int frontCap(long now) {
     R3Snapshot s=snapshot();
-    if (!recentTelemetry(now) || sensorFault()) return 0;
+    if (!recentTelemetry(now) || sensorFault()) { lastFrontCap=0; return 0; }
     if (usable(s.center,now) && s.center.mm<=FRONT_STOP) { frontLatched=true; frontClearCount=0; }
-    if (frontLatched) return 0;
+    if (frontLatched) { lastFrontCap=0; return 0; }
     // In visible follow, range/signal-invalid is treated as no obvious obstacle. A
     // previously observed near obstacle remains latched; blind exploration cannot use this assumption.
-    if (!usable(s.center,now)) return visibleForward(now) ? maximumGear : 0;
+    if (!usable(s.center,now)) {
+      lastFrontCap=visibleForward(now)?maximumGear:0;
+      return lastFrontCap;
+    }
     int cap=s.center.mm<400 ? 6 : s.center.mm<500 ? 10 : maximumGear;
-    return cap;
+    lastFrontCap=cap; return cap;
   }
   private Output gated(int l, int r, String why, long now) {
     if (l==0 && r==0) return stop(why);
@@ -182,7 +202,19 @@ public final class ShoppingFollowController {
         && (f.simulatorIdentity.tracking==null || f.simulatorIdentity.tracking.matchesFrame(f));
     int persons=Math.max(f.persons==null?0:f.persons.size(),o==null?0:o.personCount);
     if(f.detectionTierEvidence!=null) persons=Math.max(persons,f.detectionTierEvidence.lowConfidencePersons.size());
-    if (trusted && (seenTrack<0 || o.trackId==seenTrack)) {
+    if (trusted) {
+      if (seenTrack>=0 && o.trackId!=seenTrack) {
+        if (handoffTrack!=o.trackId) {
+          resetFollowContextForHandoff();
+          handoffTrack=o.trackId;
+          handoffFrames=0;
+        }
+        if (++handoffFrames<3) return stop("shopping_track_handoff_"+handoffFrames+"_of_3");
+        seenTrack=targetTrack=o.trackId;
+        handoffTrack=-1; handoffFrames=0; stableFrames=2;
+      } else {
+        handoffTrack=-1; handoffFrames=0;
+      }
       if(phase!=Phase.FOLLOW) {
         if(++stableFrames<3) return stop("corner_target_verifying");
         phase=Phase.FOLLOW; started=-1; opening=inside=unknownEdge=false; outwardCount=0; aim.reset();
@@ -191,6 +223,7 @@ public final class ShoppingFollowController {
       if(targetTrack!=o.trackId) { targetTrack=o.trackId; width=0; stableFrames=0; }
       return visible(f,o,now,freshRange,persons);
     }
+    handoffTrack=-1; handoffFrames=0;
     stableFrames=0;
     if(present || persons>0) {
       if(phase!=Phase.FOLLOW) return park("corner_person_ambiguity");
@@ -241,10 +274,20 @@ public final class ShoppingFollowController {
     else { if(turn>0) left--; else right--; }
     return gated(left,right,phase==Phase.WALL?"corner_wall_follow":"corner_forward_arc",now);
   }
+  private void resetFollowContextForHandoff() {
+    phase=Phase.FOLLOW; started=deadline=nextAfter=wallAt=candidateAt=-1;
+    opening=inside=unknownEdge=hasAdvanced=forward=false;
+    outwardCount=turn=wallSamples=stableFrames=0;
+    wallBaseline=width=previousWidth=rawWidth=0;
+    widthStopped=false; widthHoldUntil=0; visibleForwardAt=-1;
+    lastGearResetReason="authorized_track_handoff";
+    gear=upFrames=pendingGear=lastFinalGear=0;
+    aim.reset();
+  }
   private Output visible(FollowStateMachine.FrameResult f, TargetObservationEvidence o, long now, boolean freshRange, int persons) {
     SteeringEvidence e=f.steeringEvidence;
     if(e==null || !e.valid) return stop("shopping_steering_missing");
-    float w=o.screenBox.width();
+    float w=o.screenBox.width(); rawWidth=w;
     boolean clipped=o.screenBox.left<=.01f || o.screenBox.right>=.99f;
     if(!Float.isFinite(w)||w<=0||w>1) return stop("shopping_box_invalid");
     if(previousWidth>0 && w<previousWidth*.75f) widthHoldUntil=now+500;
@@ -284,10 +327,14 @@ public final class ShoppingFollowController {
       return stop(widthStopped?"width_hold":widthUnknown?"width_unreliable":a.reason);
     }
     aim.reset();
-    int desired=width<.22f?21:width<.30f?18:width<.45f?14:8;
-    if(margin<.12f) desired=Math.min(desired,10);
-    if(f.state==FollowState.FOLLOW_CAUTION || f.behaviorDecision.selectedAction==BehaviorAction.FOLLOW_CAUTION) desired=Math.min(desired,14);
-    if(f.simulatorIdentity.tracking!=null) desired=Math.min(desired,f.simulatorIdentity.tracking.maximumGear);
+    int desired=width<.40f?21:width<.50f?18:width<.55f?14:width<.60f?10:8;
+    lastDesiredGear=desired;
+    lastEdgeCap=margin<.12f?10:21;
+    if(margin<.12f) desired=Math.min(desired,lastEdgeCap);
+    lastCautionCap=f.state==FollowState.FOLLOW_CAUTION || f.behaviorDecision.selectedAction==BehaviorAction.FOLLOW_CAUTION?14:21;
+    desired=Math.min(desired,lastCautionCap);
+    lastIdentityCap=f.simulatorIdentity.tracking==null?21:f.simulatorIdentity.tracking.maximumGear;
+    if(f.simulatorIdentity.tracking!=null) desired=Math.min(desired,lastIdentityCap);
     desired=Math.min(desired,Math.min(maximumGear,frontCap(now)));
     if(desired==0) return stop(frontBlockReason(now));
     if(gear==0) gear=Math.min(desired,8);
@@ -302,7 +349,9 @@ public final class ShoppingFollowController {
     if(angled && turn!=0 && outwardCount>=3 && usable(side(turn),now) && side(turn).mm<350) {
       if(turn>0) { r=gear; l=Math.max(6,gear-1); } else { l=gear; r=Math.max(6,gear-1); }
     }
-    return gated(l,r,margin<.12f?"visible_edge_arc":"width_follow",now);
+    Output result=gated(l,r,margin<.12f?"visible_edge_arc":"width_follow",now);
+    lastFinalGear=Math.max(Math.abs(result.left),Math.abs(result.right));
+    return result;
   }
   public synchronized Output poll(long now) {
     lastDecisionAt=now;

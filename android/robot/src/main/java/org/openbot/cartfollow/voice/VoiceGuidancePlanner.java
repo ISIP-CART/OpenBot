@@ -1,86 +1,97 @@
 package org.openbot.cartfollow.voice;
 
-import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.Map;
+import org.openbot.cartfollow.BehaviorAction;
 import org.openbot.cartfollow.FollowState;
+import org.openbot.cartfollow.FollowStateMachine;
+import org.openbot.cartfollow.InitializationPositioningEvidence;
 
-/** Converts stable cart-follow state changes into sparse, actionable speech prompts. */
+/** Converts structured follow stages into sparse prompts; display strings never drive behavior. */
 final class VoiceGuidancePlanner {
   static final long REPEAT_INTERVAL_MS = 8000L;
-
   static final class Prompt {
-    final int textRes;
-    final boolean urgent;
+    final int textRes; final boolean urgent; final String key;
+    Prompt(int textRes, boolean urgent) { this(textRes, urgent, String.valueOf(textRes)); }
+    Prompt(int textRes, boolean urgent, String key) { this.textRes=textRes; this.urgent=urgent; this.key=key; }
+  }
+  private final Map<String, Long> spokenAt = new HashMap<>();
+  private final boolean automaticConfirmation;
+  private String previousKey = "idle";
 
-    Prompt(int textRes, boolean urgent) {
-      this.textRes = textRes;
-      this.urgent = urgent;
-    }
+  VoiceGuidancePlanner() { this(false); }
+
+  VoiceGuidancePlanner(boolean automaticConfirmation) {
+    this.automaticConfirmation = automaticConfirmation;
   }
 
-  private final Map<FollowState, Long> spokenAt = new EnumMap<>(FollowState.class);
-  private FollowState previousState = FollowState.IDLE;
-  private boolean clippedPromptActive;
-  private long clippedPromptAtMs = -REPEAT_INTERVAL_MS;
+  Prompt onFrame(FollowStateMachine.FrameResult frame, long nowMs) {
+    if (frame == null || frame.state == null) return null;
+    Prompt candidate = candidate(frame);
+    if (candidate == null) return null;
+    boolean changed = !candidate.key.equals(previousKey);
+    previousKey = candidate.key;
+    Long last = spokenAt.get(candidate.key);
+    if (!changed || (last != null && nowMs - last < REPEAT_INTERVAL_MS)) return null;
+    spokenAt.put(candidate.key, nowMs);
+    return candidate;
+  }
 
-  Prompt onFrame(FollowState state, String diagnostic, long nowMs) {
-    if (state == null) return null;
-    boolean stateChanged = state != previousState;
-    previousState = state;
-    if (state == FollowState.DISTANCE_CALIBRATION) {
-      boolean clipped = diagnostic != null && diagnostic.contains("完整人物入镜");
-      if (clipped && !clippedPromptActive && nowMs - clippedPromptAtMs >= REPEAT_INTERVAL_MS) {
-        clippedPromptActive = true;
-        clippedPromptAtMs = nowMs;
-        return new Prompt(VoicePrompts.CALIBRATION_CLIPPED, false);
+  Prompt system(int textRes, String key) { previousKey=key; return new Prompt(textRes,true,key); }
+  void reset() { previousKey="idle"; spokenAt.clear(); }
+
+  private Prompt candidate(FollowStateMachine.FrameResult frame) {
+    InitializationPositioningEvidence p = frame.initializationPositioningEvidence;
+    if (p != null && p.phase == InitializationPositioningEvidence.Phase.TIMEOUT)
+      return new Prompt(
+          automaticConfirmation
+              ? VoicePrompts.AUTO_POSITIONING_TIMEOUT
+              : VoicePrompts.POSITIONING_TIMEOUT,
+          true,
+          "positioning_timeout");
+    if (frame.state == FollowState.AUTO_POSITIONING && p != null) {
+      switch (p.phase) {
+        case REVERSING: return new Prompt(VoicePrompts.POSITIONING_REVERSE,false,"positioning_reverse");
+        case SETTLING:
+        case READY: return new Prompt(VoicePrompts.CALIBRATION,false,"initializing_full_body");
+        default:
+          boolean interrupted=p.reason!=null&&(p.reason.contains("missing")||p.reason.contains("competing")||p.reason.contains("track"));
+          return new Prompt(
+              interrupted
+                  ? VoicePrompts.POSITIONING_INTERRUPTED
+                  : automaticConfirmation
+                      ? VoicePrompts.AUTO_POSITIONING
+                      : VoicePrompts.POSITIONING,
+              interrupted,interrupted?"positioning_interrupted":"positioning_wait");
       }
-      if (!clipped) clippedPromptActive = false;
-    } else {
-      clippedPromptActive = false;
     }
-    if (!stateChanged || !canSpeak(state, nowMs)) return null;
-    switch (state) {
-      case CAPTURE_TARGET:
-        return prompt(VoicePrompts.CAPTURE, false, nowMs);
+    switch (frame.state) {
+      case CAPTURE_TARGET: return new Prompt(VoicePrompts.CAPTURE,false,"capture");
       case LOCKED_PENDING_CONFIRM:
-        return prompt(VoicePrompts.CONFIRM, false, nowMs);
+        return automaticConfirmation ? null : new Prompt(VoicePrompts.CONFIRM,false,"confirm");
       case DISTANCE_CALIBRATION:
-        return prompt(VoicePrompts.CALIBRATION, false, nowMs);
       case CONFIRMED_ARMED:
-      case REACQUIRE_TARGET:
-        return prompt(VoicePrompts.REACQUIRE, false, nowMs);
-      case READY_TO_FOLLOW:
-        return prompt(VoicePrompts.COUNTDOWN, false, nowMs);
+      case REACQUIRE_TARGET: return new Prompt(VoicePrompts.CALIBRATION,false,"initializing_full_body");
+      case READY_TO_FOLLOW: return new Prompt(VoicePrompts.COUNTDOWN,false,"countdown");
       case FOLLOW:
-        return prompt(VoicePrompts.FOLLOW, false, nowMs);
-      case IDENTITY_UNCERTAIN:
-        return prompt(VoicePrompts.IDENTITY_UNCERTAIN, true, nowMs);
-      case LOST:
-        return prompt(VoicePrompts.LOST, true, nowMs);
+      case FOLLOW_CAUTION:
+        if (frame.simulatorIdentity != null
+            && (!frame.simulatorIdentity.motionAllowed
+                || (!frame.simulatorIdentity.authorized
+                    && !frame.simulatorIdentity.isContinuous())))
+          return new Prompt(VoicePrompts.IDENTITY_UNCERTAIN,true,"identity_uncertain");
+        return new Prompt(VoicePrompts.FOLLOW,false,"follow");
+      case IDENTITY_UNCERTAIN: return new Prompt(VoicePrompts.IDENTITY_UNCERTAIN,true,"identity_uncertain");
+      case LOST: return new Prompt(VoicePrompts.LOST,true,"lost");
       case SEARCH:
       case DIRECTED_REACQUIRE:
-        return prompt(VoicePrompts.SEARCH, false, nowMs);
-      case STOP:
-        return prompt(VoicePrompts.STOPPED, true, nowMs);
-      default:
-        return null;
+        if(frame.realDriveResult!=null && frame.realDriveResult.reason!=null
+            && frame.realDriveResult.reason.startsWith("corner_")) return null;
+        if(frame.behaviorDecision!=null&&(frame.behaviorDecision.selectedAction==BehaviorAction.FOLLOW_SLOW
+            ||frame.behaviorDecision.selectedAction==BehaviorAction.FOLLOW_CAUTION)) return null;
+        return new Prompt(VoicePrompts.SEARCH,false,"search");
+      case STOP: return new Prompt(VoicePrompts.STOPPED,true,"stopped");
+      default: return null;
     }
-  }
-
-  void reset() {
-    previousState = FollowState.IDLE;
-    clippedPromptActive = false;
-    clippedPromptAtMs = -REPEAT_INTERVAL_MS;
-    spokenAt.clear();
-  }
-
-  private boolean canSpeak(FollowState state, long nowMs) {
-    Long last = spokenAt.get(state);
-    return last == null || nowMs - last >= REPEAT_INTERVAL_MS;
-  }
-
-  private Prompt prompt(int textRes, boolean urgent, long nowMs) {
-    spokenAt.put(previousState, nowMs);
-    return new Prompt(textRes, urgent);
   }
 }

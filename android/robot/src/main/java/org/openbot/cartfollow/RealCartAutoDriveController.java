@@ -4,6 +4,7 @@ package org.openbot.cartfollow;
 public final class RealCartAutoDriveController {
   public enum Phase {
     LOCKED,
+    INITIALIZATION_REVERSE,
     WAIT_TARGET,
     WAIT_CENTER,
     MOVING_STRAIGHT,
@@ -17,6 +18,7 @@ public final class RealCartAutoDriveController {
 
   public enum Intent {
     STOP,
+    REVERSE,
     FOLLOW,
     PIVOT
   }
@@ -62,13 +64,16 @@ public final class RealCartAutoDriveController {
         boolean lockout,
         AimDecision aimDecision,
         TranslationDecision translationDecision) {
-      this.left = phase == Phase.PIVOT ? Math.max(-21, Math.min(21, left)) : clamp(left);
-      this.right = phase == Phase.PIVOT ? Math.max(-21, Math.min(21, right)) : clamp(right);
+      boolean signed = phase == Phase.PIVOT || phase == Phase.INITIALIZATION_REVERSE;
+      this.left = signed ? Math.max(-21, Math.min(21, left)) : clamp(left);
+      this.right = signed ? Math.max(-21, Math.min(21, right)) : clamp(right);
       this.intent =
           left == 0 && right == 0
               ? Intent.STOP
-              : phase == Phase.PIVOT ? Intent.PIVOT : Intent.FOLLOW;
-      this.gear = intent == Intent.FOLLOW ? Math.max(this.left, this.right) : 0;
+              : phase == Phase.PIVOT ? Intent.PIVOT
+                  : phase == Phase.INITIALIZATION_REVERSE ? Intent.REVERSE : Intent.FOLLOW;
+      this.gear = intent == Intent.FOLLOW ? Math.max(this.left, this.right)
+          : intent == Intent.REVERSE ? Math.max(Math.abs(this.left), Math.abs(this.right)) : 0;
       this.phase = phase;
       this.reason = reason;
       this.rawTurn = evidence == null ? 0f : evidence.rawError;
@@ -120,6 +125,28 @@ public final class RealCartAutoDriveController {
   private long targetMissingStartMs = -1L;
   private final TargetAimController aimController = new TargetAimController();
   private Result lastResult = stopped(Phase.LOCKED, "auto_locked", false, null, Float.NaN);
+
+  public synchronized Result initializationPositioning(boolean reverse, String reason) {
+    maintainedStart.reset();
+    moving = reverse;
+    centeredFrames = 0;
+    gears.reset();
+    aimController.reset();
+    return remember(
+        reverse
+            ? new Result(
+                -InitializationPositioningController.REVERSE_GEAR,
+                -InitializationPositioningController.REVERSE_GEAR,
+                Phase.INITIALIZATION_REVERSE,
+                reason == null ? "initialization_reverse" : reason,
+                null,
+                Float.NaN,
+                false,
+                AimDecision.blocked("initialization_reverse"),
+                TranslationDecision.block("initialization_reverse"))
+            : stopped(Phase.WAIT_TARGET, reason == null ? "initialization_stop" : reason,
+                false, null, Float.NaN));
+  }
 
   public synchronized Result update(FollowStateMachine.FrameResult frame, long nowMs) {
     if (!moving) maintainedStart.prime(frame, nowMs, 400L);
