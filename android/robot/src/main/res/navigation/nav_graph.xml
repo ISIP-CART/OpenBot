@@ -142,6 +142,12 @@
         tools:layout="@layout/fragment_human_cart_simulator" />
 
     <fragment
+        android:id="@+id/shoppingCartFragment"
+        android:name="org.openbot.cartfollow.ShoppingCartFragment"
+        android:label="ShoppingCart"
+        tools:layout="@layout/fragment_human_cart_simulator" />
+
+    <fragment
         android:id="@+id/personCropCollectorFragment"
         android:name="org.openbot.cropcollector.PersonCropCollectorFragment"
         android:label="fragment_person_crop_collector"

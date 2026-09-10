@@ -39,6 +39,7 @@ public class FeatureList {
   public static final String CART_SIMULATOR = "Cart Simulator";
   public static final String VOICE_CART_SIMULATOR = "Voice Cart Simulator";
   public static final String REAL_CART_FOLLOW = "Real Cart Follow";
+  public static final String SHOPPING_CART = "ShoppingCart";
   public static final String PERSON_CROP_COLLECTOR = "Person Crop Collector";
   public static final String PERSON_SEQUENCE_COLLECTOR = "Person Sequence Collector";
   public static final String MODEL_MANAGEMENT = "Model Management";
@@ -91,6 +92,7 @@ public class FeatureList {
     subCategories.add(
         new SubCategory(VOICE_CART_SIMULATOR, R.drawable.ic_person_search, "#5C9ED6"));
     subCategories.add(new SubCategory(REAL_CART_FOLLOW, R.drawable.ic_electric_car, "#D05A47"));
+    subCategories.add(new SubCategory(SHOPPING_CART, R.drawable.ic_electric_car, "#2E9B62"));
     subCategories.add(
         new SubCategory(PERSON_CROP_COLLECTOR, R.drawable.ic_person_search, "#8BBF6B"));
     subCategories.add(

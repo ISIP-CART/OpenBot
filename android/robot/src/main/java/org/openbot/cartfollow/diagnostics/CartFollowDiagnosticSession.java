@@ -131,6 +131,8 @@ public class CartFollowDiagnosticSession {
               + ",raw_low_candidate_count,tracked_low_candidate_count,identity_candidate_count,multi_check_state,primary_limit_reason"
               + ",aim_allowed,aim_mode,aim_error,aim_reason,translation_allowed,translation_max_gear,translation_reason"
               + ",initialization_samples,initialization_track_id,initialization_discard_reason,distance_calibration_samples,distance_calibration_completed_ms"
+              + ",positioning_phase,positioning_track_id,positioning_stable_frames,positioning_stable_span_ms,positioning_center_span_x,positioning_center_span_y,positioning_size_variation,positioning_screen_box,positioning_clip_left,positioning_clip_top,positioning_clip_right,positioning_clip_bottom,positioning_full_body,positioning_reverse_elapsed_ms,positioning_reason,positioning_full_body_observed_ms,positioning_stop_latency_ms"
+              + ",positioning_margin_left,positioning_margin_top,positioning_margin_right,positioning_margin_bottom,positioning_reverse_started_ms,positioning_reverse_ended_ms"
               + ",range_capability,range_minimum_mm,range_received_ms,range_fresh,range_gate_reason,range_firmware_error,range_firmware_error_received_ms");
       writeHeader(identityLogCsv, IDENTITY_LOG_HEADER);
       writeHeader(eventsCsv, EVENTS_HEADER);
@@ -173,12 +175,14 @@ public class CartFollowDiagnosticSession {
                 .put("started_monotonic_ms", startedMonotonicMs)
                 .put("app_mode", mode)
                 .put("initial_control_mode", initialControlMode)
-                .put("log_version", 11)
+                .put("log_version", 13)
+                .put("entry_presentation", mode)
+                .put("initialization_positioning", "auto-reverse-framing-v1")
                 .put("build", org.openbot.BuildConfig.VERSION_NAME)
                 .put("build_stamp", org.openbot.BuildConfig.CART_BUILD_STAMP)
                 .put("strategy", org.openbot.cartfollow.FollowTuning.VERSION)
                 .put("shopping_strategy", org.openbot.cartfollow.ShoppingFollowController.VERSION)
-                .put("r3_visible_invalid_policy", "assume_clear_when_identity_and_camera_current")
+                .put("r3_visible_invalid_policy", "status_1_2_3_5_assume_clear_when_identity_and_camera_current;status_4_stop")
                 .put("curve_enter_error", org.openbot.cartfollow.FollowTuning.CURVE_ENTER)
                 .put("curve_exit_error", org.openbot.cartfollow.FollowTuning.CURVE_EXIT)
                 .put("curve_gain", "linear((damped_abs_error-0.03)/0.82)")

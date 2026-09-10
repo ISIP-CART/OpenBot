@@ -25,6 +25,11 @@ public class ShoppingFollowControllerTest {
     session.accept("!R3D,"+(sequence++ & 65535)+",0,-1,1,65535,"+center+",0,0,-1,1,65535",now,s->{});
     return session.status();
   }
+  private R3TelemetrySession.Status statusRanges(long now,int leftStatus,int centerStatus,int rightStatus) {
+    session.discover(true,true,0,s->{}); session.accept("!R3,OK,100",0,s->{});
+    session.accept("!R3D,"+(sequence++ & 65535)+",0,-1,"+leftStatus+",65535,-1,"+centerStatus+",65535,-1,"+rightStatus+",65535",now,s->{});
+    return session.status();
+  }
   private FollowStateMachine.FrameResult frame(long now,float width,float error,float rate,boolean visible) {
     FollowStateMachine.FrameResult f=new FollowStateMachine.FrameResult(visible?FollowState.FOLLOW:FollowState.IDENTITY_UNCERTAIN,
         new Control(0,0),null,null,new ArrayList<>(visible?Collections.singletonList(null):Collections.emptyList()),visible,false,null,0);
@@ -85,6 +90,17 @@ public class ShoppingFollowControllerTest {
     }
     assertTrue(out.left>0 && out.right>0);
     assertTrue(out.reason.endsWith("_range_assumed_clear"));
+  }
+  @Test public void notPresentDoesNotBlockVisibleFollowButBusErrorDoes() {
+    ShoppingFollowController.Output out=null;
+    for(int i=0;i<6;i++) {
+      long now=i*100; controller.environment(statusRanges(now,2,2,5),0,true,false);
+      out=controller.update(frame(now,.2f,0,0,true),now);
+    }
+    assertTrue(out.left>0); assertTrue(out.reason.endsWith("_range_assumed_clear"));
+    long now=700; controller.environment(statusRanges(now,2,4,5),0,true,false);
+    out=controller.update(frame(now,.2f,0,0,true),now);
+    assertEquals(0,out.left); assertEquals("range_sensor_fault",out.reason);
   }
   @Test public void invalidEchoCannotReleaseKnownNearObstacle() {
     for(int i=0;i<6;i++) step(i*100,.4f,0,0,true,900,900,900,0,false);

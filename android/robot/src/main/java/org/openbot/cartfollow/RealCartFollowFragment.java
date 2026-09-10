@@ -11,6 +11,7 @@ import android.os.SystemClock;
 import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewTreeObserver;
 import android.widget.Toast;
 import androidx.navigation.Navigation;
 import org.openbot.BuildConfig;
@@ -51,6 +52,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
   private View activeManualButton;
   private String lastSessionEndReason = "none";
   private SteeringTuningRecorder tuningRecorder;
+  private View windowFocusRoot;
+  private ViewTreeObserver.OnWindowFocusChangeListener windowFocusListener;
   private int manualForwardLogical = ManualSpeedProfile.DEFAULT_FORWARD_LOGICAL;
   private RealFollowSettings followSettings = new RealFollowSettings();
   private final RealCartSearchController searchController = new RealCartSearchController();
@@ -139,31 +142,21 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
     binding.connectBle.setOnClickListener(
         v -> Navigation.findNavController(requireView()).navigate(R.id.open_bluetooth_fragment));
     installAutoUnlock();
-    binding
-        .getRoot()
+    windowFocusRoot = binding.getRoot();
+    windowFocusListener =
+        hasFocus -> {
+          if (!hasFocus && binding != null) {
+            if (safetyController.getMode() == RealCartSafetyController.Mode.MANUAL) {
+              invalidateManualControl("window_focus_lost", true);
+            } else {
+              finishAutoSession("window_focus_lost", true);
+            }
+          }
+        };
+    windowFocusRoot
         .getViewTreeObserver()
-        .addOnWindowFocusChangeListener(
-            hasFocus -> {
-              if (!hasFocus && binding != null) {
-                if (safetyController.getMode() == RealCartSafetyController.Mode.MANUAL) {
-                  invalidateManualControl("window_focus_lost", true);
-                } else {
-                  finishAutoSession("window_focus_lost", true);
-                }
-              }
-            });
-    binding.emergencyStop.setOnClickListener(
-        v -> {
-          lastSessionEndReason = "emergency_stop";
-          logSession("end", lastSessionEndReason);
-          safetyController.latchEmergency();
-          invalidateManualControl("emergency_stop", true);
-          vehicle.emergencyStop();
-          binding.startSwitch.setChecked(false);
-          binding.startSwitch.setEnabled(false);
-          resetFollowSession();
-          refreshRealUi();
-        });
+        .addOnWindowFocusChangeListener(windowFocusListener);
+    binding.emergencyStop.setOnClickListener(v -> triggerEmergencyStop());
     setMode(RealCartSafetyController.Mode.MANUAL);
   }
 
@@ -208,6 +201,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
       binding.startSwitch.setChecked(false);
       binding.startSwitch.setEnabled(false);
       resetFollowSession();
+      onReleaseRunStateChanged(false, "paused");
     }
   }
 
@@ -334,6 +328,11 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
               + " · c0,0";
         case LOCKED_PENDING_CONFIRM:
           return "请确认目标 · c0,0";
+        case AUTO_POSITIONING:
+          return (frameResult.distanceDiagnosticText == null
+                      ? "请保持站立"
+                      : frameResult.distanceDiagnosticText)
+              + " · c0,0";
         case DISTANCE_CALIBRATION:
           return (frameResult.distanceDiagnosticText == null
                       || frameResult.distanceDiagnosticText.isEmpty()
@@ -392,7 +391,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
     updateConnectionState();
   }
 
-  private void setMode(RealCartSafetyController.Mode mode) {
+  protected final void setMode(RealCartSafetyController.Mode mode) {
     invalidateManualControl("mode_change", true);
     safetyController.setMode(mode);
     org.openbot.cartfollow.diagnostics.CartFollowDiagnosticSession session =
@@ -416,6 +415,63 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
     }
     configureResponsiveLayout(binding.getRoot().getWidth(), binding.getRoot().getHeight());
     refreshRealUi();
+  }
+
+  /** Starts the shared autonomous pipeline from the simplified release UI. */
+  protected final String startReleaseFollowing() {
+    updateConnectionState();
+    ReleaseStartReadiness readiness =
+        getReleaseStartReadiness(SystemClock.elapsedRealtime());
+    if (!readiness.ready()) return readiness.message;
+    setMode(RealCartSafetyController.Mode.AUTO);
+    if (!safetyController.unlockAuto()) return "小车尚未满足启动条件";
+    safetyController.setMaximumGear(releaseMaximumGear());
+    binding.startSwitch.setEnabled(true);
+    requestFollowEnabled(true);
+    onReleaseRunStateChanged(true, "started");
+    return null;
+  }
+
+  protected final void stopReleaseFollowing(String reason) {
+    if (binding == null) return;
+    if (binding.startSwitch.isChecked()) requestFollowEnabled(false);
+    else {
+      latestOutput = safetyController.resetAutoDrive(reason, false);
+      sendOutput(latestOutput);
+    }
+    onReleaseRunStateChanged(false, reason);
+  }
+
+  protected final void triggerEmergencyStop() {
+    lastSessionEndReason = "emergency_stop";
+    logSession("end", lastSessionEndReason);
+    safetyController.latchEmergency();
+    invalidateManualControl("emergency_stop", true);
+    vehicle.emergencyStop();
+    binding.startSwitch.setChecked(false);
+    binding.startSwitch.setEnabled(false);
+    resetFollowSession();
+    onReleaseRunStateChanged(false, "emergency_stop");
+    refreshRealUi();
+  }
+
+  protected int releaseMaximumGear() { return 21; }
+
+  protected boolean isReleasePresentation() { return false; }
+
+  protected void onReleaseRunStateChanged(boolean running, String reason) {}
+
+  protected void onRealUiRefreshed(
+      String connection, boolean emergency, ReleaseStartReadiness readiness) {}
+
+  protected final ReleaseStartReadiness getReleaseStartReadiness(long nowMs) {
+    return ReleaseStartReadiness.evaluate(
+        safetyController.isEmergencyLatched(),
+        vehicle != null && vehicle.isBleSerialReady(),
+        vehicle != null && vehicle.isCartFirmwareReady(),
+        isDetectorReady(),
+        getInferenceErrorMessage(),
+        isCameraReady(nowMs));
   }
 
   private void installManualTouchRouter() {
@@ -704,6 +760,7 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
         followSettings.searchTimeoutMs);
     binding.startSwitch.setEnabled(false);
     resetFollowSession();
+    onReleaseRunStateChanged(false, reason);
     refreshRealUi();
   }
 
@@ -829,6 +886,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
     else if(result.reason.startsWith("shopping_")) shoppingLabel="近距离跟随";
     if(shoppingLabel!=null) return shoppingLabel+" · c"+result.left+","+result.right+" · "+result.reason;
     switch (result.phase) {
+      case INITIALIZATION_REVERSE:
+        return "正在自动后退取景 · c" + result.left + "," + result.right;
       case MOVING_STRAIGHT:
         return "小车直行 · c" + result.left + "," + result.right;
       case CURVE_LEFT:
@@ -1000,6 +1059,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
                       "Android 仅记录三路最小值 " + range.minimumDistanceMm + " mm；ESP32 旧固件仍可能按单路传感器拒绝运动");
                 }
               }
+              onRealUiRefreshed(
+                  connection, emergency, getReleaseStartReadiness(SystemClock.elapsedRealtime()));
             });
   }
 
@@ -1052,9 +1113,18 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
   }
 
   @Override
-  public void onDestroy() {
-    if (tuningRecorder != null) tuningRecorder.shutdown();
-    super.onDestroy();
+  public void onDestroyView() {
+    if (windowFocusRoot != null && windowFocusListener != null) {
+      ViewTreeObserver observer = windowFocusRoot.getViewTreeObserver();
+      if (observer.isAlive()) observer.removeOnWindowFocusChangeListener(windowFocusListener);
+    }
+    windowFocusListener = null;
+    windowFocusRoot = null;
+    if (tuningRecorder != null) {
+      tuningRecorder.shutdown();
+      tuningRecorder = null;
+    }
+    super.onDestroyView();
   }
 
   private void installSteeringStrengthTuning() {
@@ -1313,7 +1383,8 @@ public class RealCartFollowFragment extends BaseCartFollowFragment implements Se
             searchEnabled);
     configureFollowPolicy(policy);
     configureRecentGallery(followSettings.dynamicGallery && followSettings.recent);
-    safetyController.setMaximumGear(followSettings.maximumGear);
+    safetyController.setMaximumGear(
+        isReleasePresentation() ? releaseMaximumGear() : followSettings.maximumGear);
     stateMachine.setMaximumDistanceMultiplier(followSettings.maximumDistanceMultiplier);
     searchController.configure(
         policy.directedSearch,

@@ -5,7 +5,7 @@ import org.openbot.vehicle.R3TelemetrySession;
 
 /** Shared close-follow and finite shelf exploration policy; all distances are sensor-origin mm. */
 public final class ShoppingFollowController {
-  public static final String VERSION = "shopping-visible-range-v2";
+  public static final String VERSION = "shopping-visible-range-v3";
   public static final float WIDTH_START = .45f, WIDTH_STOP = .55f;
   public static final int FRONT_STOP = 300, FRONT_CLEAR = 400, SIDE_STOP = 250;
   public static final int SIDE_CLEAR = 350;
@@ -107,7 +107,11 @@ public final class ShoppingFollowController {
   }
   private boolean sensorFault() {
     R3Snapshot s=snapshot();
-    return s!=null && (s.left.status>=4 || s.center.status>=4 || s.right.status>=4);
+    // Only an explicit bus/acquisition failure is a hard sensor fault. Signal/range invalid,
+    // stale-with-a-fresh-snapshot, and not-present provide no obstacle evidence. Visible target
+    // following may continue under the existing near-obstacle latch; blind corner exploration
+    // still requires usable readings below.
+    return s!=null && (s.left.status==4 || s.center.status==4 || s.right.status==4);
   }
   private boolean visibleForward(long now) {
     return phase==Phase.FOLLOW && visibleForwardAt>=0 && now>=visibleForwardAt

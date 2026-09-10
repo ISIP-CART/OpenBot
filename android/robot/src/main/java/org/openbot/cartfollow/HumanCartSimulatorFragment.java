@@ -445,6 +445,10 @@ public class HumanCartSimulatorFragment extends BaseCartFollowFragment
               + " · 模拟输出 c0,0";
         case LOCKED_PENDING_CONFIRM:
           return "请确认目标 · 模拟输出 c0,0";
+        case AUTO_POSITIONING:
+          return (frameResult.distanceDiagnosticText == null
+                  ? "请保持站立" : frameResult.distanceDiagnosticText)
+              + " · 模拟输出 c0,0";
         case DISTANCE_CALIBRATION:
           return (frameResult.distanceDiagnosticText == null
                   ? "已确认，正在视觉参考标定"
@@ -460,6 +464,8 @@ public class HumanCartSimulatorFragment extends BaseCartFollowFragment
       }
     }
     if (result.left != 0 || result.right != 0) {
+      if (result.phase == SimulatorAutoDriveController.Phase.INITIALIZATION_REVERSE)
+        return "正在自动后退取景 · 模拟输出 c" + result.left + "," + result.right;
       if (search.phase == DirectedReacquireEvidence.Phase.TURNING
           && result.phase == SimulatorAutoDriveController.Phase.RECOVERY_STOP)
         return directedTurningText(search, result);

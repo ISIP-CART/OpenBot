@@ -103,9 +103,11 @@ public class TargetMemory {
 
   public boolean offerDistanceCalibrationSample(
       RectF bbox, int frameW, int frameH, int sensorOrientation, long observedAtMs) {
+    InitializationFraming.Result framing =
+        InitializationFraming.evaluate(bbox, frameW, frameH, sensorOrientation);
     float[] geometry = normalizedGeometry(bbox, frameW, frameH, sensorOrientation);
-    if (geometry == null || geometry[3] < 0.01f || geometry[2] > 0.99f) {
-      distanceCalibrationStatus = "人物顶部或底部被裁切，请重新站位";
+    if (geometry == null || !framing.fullBody()) {
+      distanceCalibrationStatus = "人物框触及画面边缘，暂停采样";
       return false;
     }
     distanceCalibrationSamples.add(new float[] {geometry[0], geometry[1], geometry[2]});

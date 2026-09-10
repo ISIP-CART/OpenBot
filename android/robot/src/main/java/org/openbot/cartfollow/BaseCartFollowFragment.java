@@ -11,6 +11,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -38,10 +39,13 @@ import org.openbot.tflite.Model;
 import org.openbot.tflite.Network;
 import org.openbot.utils.CameraUtils;
 import org.openbot.utils.Enums;
+import org.openbot.utils.FileUtils;
 import org.openbot.vehicle.Control;
 import timber.log.Timber;
 
 public class BaseCartFollowFragment extends CameraFragment {
+
+  private static final String INFERENCE_STARTUP_TAG = "CartInferenceStartup";
 
   private static final int COLOR_TARGET = 0;
   private static final int COLOR_CANDIDATE = 1;
@@ -56,13 +60,17 @@ public class BaseCartFollowFragment extends CameraFragment {
 
   private final AtomicBoolean computingNetwork = new AtomicBoolean(false);
   private final AtomicLong modelConfigGeneration = new AtomicLong(0L);
-  private volatile boolean modelConfigPending;
+  private final InferenceStartupCoordinator inferenceStartup =
+      new InferenceStartupCoordinator();
+  private volatile String inferenceErrorMessage = "";
+  private volatile String modelSelectionErrorMessage = "";
   private float minConfidence = 0.5f;
 
   private volatile InferenceResources inferenceResources;
   private int sensorOrientation;
 
   private Model model;
+  private DetectorLoader detectorLoader = DetectorLoader.DEFAULT;
   private Network.Device device = Network.Device.CPU;
   private int numThreads = -1;
   private final String classType = "person";
@@ -119,6 +127,9 @@ public class BaseCartFollowFragment extends CameraFragment {
   private float completedFps;
   private long lastSteeringObservationMs = -1L;
   private volatile long drawObservedAtMs;
+  private volatile long latestCameraFrameReceivedMs = -1L;
+  private volatile int latestCameraFrameWidth;
+  private volatile int latestCameraFrameHeight;
 
   private final List<DrawBox> drawBoxes = new ArrayList<>();
   private int drawFrameWidth = 0;
@@ -189,8 +200,24 @@ public class BaseCartFollowFragment extends CameraFragment {
           controlGenerator.MIN_CONFIDENCE = minConfidence;
         });
 
-    List<String> models = getModelNames(f -> f.type.equals(Model.TYPE.DETECTOR));
-    initModelSpinner(binding.modelSpinner, models, preferencesManager.getObjectNavModel());
+    List<Model> detectorModels = new ArrayList<>();
+    if (masterList != null) {
+      for (Model candidate : masterList) {
+        if (candidate != null && candidate.type == Model.TYPE.DETECTOR) {
+          detectorModels.add(candidate);
+        }
+      }
+    }
+    DetectorModelResolver.Result modelResult =
+        initializeDetectorModel(detectorModels, preferencesManager.getObjectNavModel());
+    List<String> models = new ArrayList<>();
+    for (Model detectorModel : detectorModels) {
+      models.add(FileUtils.nameWithoutExtension(detectorModel.name));
+    }
+    initModelSpinner(
+        binding.modelSpinner,
+        models,
+        modelResult.available() ? modelResult.model.name : "");
 
     setAnalyserResolution(Enums.Preview.HD.getValue());
 
@@ -215,6 +242,8 @@ public class BaseCartFollowFragment extends CameraFragment {
                             ? "记录已保存，可在测试记录中导出"
                             : "日志写入异常：" + session.io.error
                         : session.health());
+            if (session != null && session.io.isClosed() && !session.io.error.isEmpty())
+              onDiagnosticWriteFailure(session.io.error);
             binding.diagnosticHealth.postDelayed(this, 1000);
           }
         });
@@ -231,8 +260,9 @@ public class BaseCartFollowFragment extends CameraFragment {
                   requireContext(),
                   org.openbot.cartfollow.diagnostics.DiagnosticRecordsActivity.class));
         });
-    binding.diagnosticSwitch.setChecked(false);
-    onDiagnosticLoggingChanged(false);
+    diagnosticEnabled = diagnosticsEnabledByDefault();
+    binding.diagnosticSwitch.setChecked(diagnosticEnabled);
+    onDiagnosticLoggingChanged(diagnosticEnabled);
     binding.diagnosticSwitch.setOnClickListener(
         v -> {
           diagnosticEnabled = binding.diagnosticSwitch.isChecked();
@@ -268,7 +298,7 @@ public class BaseCartFollowFragment extends CameraFragment {
           if (enhancedRecoveryEnabled) rememberDistractors(lockedTrackId, lastPresentedPersons);
           binding.confirmPanel.setVisibility(View.GONE);
           binding.countdownText.setVisibility(View.GONE);
-          updateCommandText("已确认，请回到车前");
+          updateCommandText("已确认，请保持站立");
         });
     binding.btnRetake.setOnClickListener(
         v -> {
@@ -293,30 +323,44 @@ public class BaseCartFollowFragment extends CameraFragment {
         });
 
     binding.startSwitch.setChecked(false);
-    binding.startSwitch.setOnClickListener(
-        v -> {
-          if (binding.startSwitch.isChecked()) {
-            binding.modelSpinner.setEnabled(false);
-            if (reidCoordinator != null) reidCoordinator.reset();
-            targetTrackManager.reset();
-            beliefAccumulator.reset();
-            globalReacquireGate.reset();
-            resetRecoveryRelock();
-            startDiagnosticSession();
-            stateMachine.startCapture();
-            recordControlEvent("capture_start", "start_enabled");
-            invalidatePendingUiSnapshots();
-            onFollowEnabledChanged(true);
-          } else {
-            onFollowEnabledChanged(false);
-            resetFollowSession();
-          }
-        });
+    binding.startSwitch.setOnClickListener(v -> requestFollowEnabled(binding.startSwitch.isChecked()));
     onCartFollowViewCreated();
   }
 
   /** Hook for concrete screens to install controls without duplicating the perception pipeline. */
   protected void onCartFollowViewCreated() {}
+
+  /** Programmatic Start entry shared by the laboratory and release presentations. */
+  protected final void requestFollowEnabled(boolean enabled) {
+    if (binding == null) return;
+    binding.startSwitch.setChecked(enabled);
+    if (enabled) {
+      binding.modelSpinner.setEnabled(false);
+      if (reidCoordinator != null) reidCoordinator.reset();
+      targetTrackManager.reset();
+      beliefAccumulator.reset();
+      globalReacquireGate.reset();
+      resetRecoveryRelock();
+      startDiagnosticSession();
+      stateMachine.startCapture();
+      recordControlEvent("capture_start", "start_enabled");
+      invalidatePendingUiSnapshots();
+      onFollowEnabledChanged(true);
+    } else {
+      onFollowEnabledChanged(false);
+      resetFollowSession();
+    }
+  }
+
+  protected boolean diagnosticsEnabledByDefault() { return false; }
+
+  protected String diagnosticEntryName() {
+    return this instanceof RealCartFollowFragment ? "真实小车" : "HumanCartSimulator";
+  }
+
+  protected boolean useReleaseTargetOverlay() { return false; }
+
+  protected void onDiagnosticWriteFailure(String error) {}
 
   /** Lets real hardware screens stop synchronously when the shared Start switch changes. */
   protected void onFollowEnabledChanged(boolean enabled) {}
@@ -473,59 +517,85 @@ public class BaseCartFollowFragment extends CameraFragment {
 
   protected void onInferenceConfigurationChanged() {
     modelConfigGeneration.incrementAndGet();
-    modelConfigPending = false;
+    inferenceStartup.reset();
+    inferenceErrorMessage = "";
     InferenceResources stale = inferenceResources;
     inferenceResources = null;
-    if (stale != null) runInBackground(() -> closeDetector(stale.detector));
+    if (stale != null && !runInBackground(() -> closeDetector(stale.detector))) {
+      closeDetector(stale.detector);
+    }
   }
 
-  private void requestNetworkConfiguration(int frameWidth, int frameHeight) {
-    if (frameWidth <= 0 || frameHeight <= 0 || modelConfigPending) return;
+  void requestNetworkConfiguration(int frameWidth, int frameHeight) {
+    if (frameWidth <= 0 || frameHeight <= 0 || !inferenceErrorMessage.isEmpty()) return;
+    final long nowMs = SystemClock.elapsedRealtime();
+    InferenceStartupCoordinator.TimeoutOutcome timeout = inferenceStartup.checkTimeout(nowMs);
+    if (timeout != InferenceStartupCoordinator.TimeoutOutcome.NONE) {
+      modelConfigGeneration.incrementAndGet();
+      if (timeout == InferenceStartupCoordinator.TimeoutOutcome.FAILED) {
+        inferenceErrorMessage = "模型准备失败，请退出后重新进入";
+        logInferenceStartup("load_timeout_failed", "attempts=2");
+        return;
+      }
+      logInferenceStartup("load_timeout_retry", "retry=1");
+    }
+    if (inferenceStartup.isPending()) return;
     Model selectedModel = getModel();
-    if (selectedModel == null) return;
+    if (selectedModel == null) {
+      if (modelSelectionErrorMessage.isEmpty()) {
+        modelSelectionErrorMessage = "人物检测模型尚未初始化";
+        logInferenceStartup("model_unavailable", modelSelectionErrorMessage);
+      }
+      return;
+    }
+    Activity activity = getActivity();
+    if (activity == null || !inferenceStartup.begin(nowMs)) return;
     final long generation = modelConfigGeneration.incrementAndGet();
-    final int orientation = 90 - ImageUtils.getScreenOrientation(requireActivity());
+    final int orientation = 90 - ImageUtils.getScreenOrientation(activity);
     final Network.Device selectedDevice = getDevice();
     final int selectedThreads = getNumThreads();
-    modelConfigPending = true;
-    runInBackground(
-        () ->
-            recreateNetwork(
-                generation,
-                selectedModel,
-                selectedDevice,
-                selectedThreads,
-                frameWidth,
-                frameHeight,
-                orientation));
+    inferenceErrorMessage = "";
+    boolean submitted =
+        runInBackground(
+            () ->
+                recreateNetwork(
+                    generation,
+                    activity,
+                    selectedModel,
+                    selectedDevice,
+                    selectedThreads,
+                    frameWidth,
+                    frameHeight,
+                    orientation));
+    if (!submitted && generation == modelConfigGeneration.get()) {
+      inferenceStartup.submissionRejected();
+      logInferenceStartup("load_submission_rejected", "handler_unavailable");
+      return;
+    }
+    logInferenceStartup(
+        "load_submitted",
+        "model=" + selectedModel.name + ",frame=" + frameWidth + "x" + frameHeight);
   }
 
   private void recreateNetwork(
       long generation,
+      Activity activity,
       Model model,
       Network.Device device,
       int numThreads,
       int frameWidth,
       int frameHeight,
       int orientation) {
-    if (model == null) return;
-    Detector newDetector = null;
+    LoadedDetector loadedDetector = null;
     try {
-      newDetector = Detector.create(requireActivity(), model, device, numThreads);
-    } catch (IllegalArgumentException | IOException e) {
-      Timber.e(e, "Failed to create network.");
-      String msg =
-          model.pathType == Model.PATH_TYPE.URL
-              ? "该模型未下载，请先在主菜单 Model Management 中下载: " + model.name
-              : "模型加载失败: " + e.getMessage();
-      postModelErrorIfCurrent(generation, msg);
-      return;
-    }
-
-    try {
+      if (model == null || activity == null) return;
+      loadedDetector = detectorLoader.load(activity, model, device, numThreads);
+      if (loadedDetector == null) throw new IOException("模型加载器未返回结果");
       Bitmap croppedBitmap =
           Bitmap.createBitmap(
-              newDetector.getImageSizeX(), newDetector.getImageSizeY(), Bitmap.Config.ARGB_8888);
+              loadedDetector.imageSizeX,
+              loadedDetector.imageSizeY,
+              Bitmap.Config.ARGB_8888);
       Matrix frameToCropTransform =
           ImageUtils.getTransformationMatrix(
               frameWidth,
@@ -533,56 +603,133 @@ public class BaseCartFollowFragment extends CameraFragment {
               croppedBitmap.getWidth(),
               croppedBitmap.getHeight(),
               orientation,
-              newDetector.getCropRect(),
-              newDetector.getMaintainAspect());
+              loadedDetector.cropRect,
+              loadedDetector.maintainAspect);
       Matrix cropToFrameTransform = new Matrix();
       frameToCropTransform.invert(cropToFrameTransform);
       if (generation != modelConfigGeneration.get() || !isAdded()) {
-        closeDetector(newDetector);
         return;
       }
       InferenceResources old = inferenceResources;
       inferenceResources =
           new InferenceResources(
-              newDetector,
+              loadedDetector.detector,
               croppedBitmap,
               frameToCropTransform,
               cropToFrameTransform,
               frameWidth,
               frameHeight,
               orientation);
+      inferenceErrorMessage = "";
       sensorOrientation = orientation;
       if (old != null) closeDetector(old.detector);
+      loadedDetector = null;
+      logInferenceStartup("load_ready", "model=" + model.name);
+    } catch (IllegalArgumentException | IOException e) {
+      Timber.e(e, "Failed to create network.");
+      String msg =
+          model != null && model.pathType == Model.PATH_TYPE.URL
+              ? "该模型未下载，请先在主菜单 Model Management 中下载: " + model.name
+              : "模型加载失败: " + safeErrorMessage(e);
+      postModelErrorIfCurrent(generation, msg);
     } catch (Exception e) {
-      closeDetector(newDetector);
       Timber.e(e, "Failed to configure detector.");
-      postModelErrorIfCurrent(generation, "模型配置失败: " + e.getMessage());
+      postModelErrorIfCurrent(generation, "模型配置失败: " + safeErrorMessage(e));
     } finally {
-      if (generation == modelConfigGeneration.get()) modelConfigPending = false;
+      closeLoadedDetector(loadedDetector);
+      if (generation == modelConfigGeneration.get()) inferenceStartup.complete();
     }
+  }
+
+  private static String safeErrorMessage(Exception error) {
+    String message = error == null ? null : error.getMessage();
+    if (message != null && !message.trim().isEmpty()) return message;
+    return error == null ? "未知错误" : error.getClass().getSimpleName();
   }
 
   private void postModelErrorIfCurrent(long generation, String message) {
     if (generation != modelConfigGeneration.get() || !isAdded()) return;
-    requireActivity()
-        .runOnUiThread(
-            () -> {
-              if (generation != modelConfigGeneration.get() || !isAdded()) return;
-              Toast.makeText(requireContext().getApplicationContext(), message, Toast.LENGTH_LONG)
-                  .show();
-            });
+    inferenceErrorMessage = message == null ? "模型加载失败" : message;
+    logInferenceStartup("load_error", inferenceErrorMessage);
+    Activity activity = getActivity();
+    if (activity == null) return;
+    activity.runOnUiThread(
+        () -> {
+          if (generation != modelConfigGeneration.get() || !isAdded()) return;
+          Toast.makeText(requireContext().getApplicationContext(), inferenceErrorMessage, Toast.LENGTH_LONG)
+              .show();
+        });
+  }
+
+  private void logInferenceStartup(String event, String details) {
+    String safeDetails = details == null ? "" : details;
+    Log.i(INFERENCE_STARTUP_TAG, "event=" + event + " " + safeDetails);
+    Timber.i("cart_inference_startup event=%s %s", event, safeDetails);
+    recordControlEvent("inference_" + event, safeDetails);
   }
 
   private static void closeDetector(Detector detector) {
     if (detector != null) detector.close();
   }
 
+  private static void closeLoadedDetector(LoadedDetector loadedDetector) {
+    if (loadedDetector != null) closeDetector(loadedDetector.detector);
+  }
+
+  interface DetectorLoader {
+    DetectorLoader DEFAULT =
+        (activity, model, device, numThreads) -> {
+          Detector detector = Detector.create(activity, model, device, numThreads);
+          if (detector == null) throw new IOException("不支持的检测模型: " + model.name);
+          return new LoadedDetector(
+              detector,
+              detector.getImageSizeX(),
+              detector.getImageSizeY(),
+              detector.getCropRect(),
+              detector.getMaintainAspect());
+        };
+
+    LoadedDetector load(
+        Activity activity, Model model, Network.Device device, int numThreads) throws IOException;
+  }
+
+  static final class LoadedDetector {
+    final Detector detector;
+    final int imageSizeX;
+    final int imageSizeY;
+    final RectF cropRect;
+    final boolean maintainAspect;
+
+    LoadedDetector(
+        Detector detector,
+        int imageSizeX,
+        int imageSizeY,
+        RectF cropRect,
+        boolean maintainAspect) {
+      this.detector = detector;
+      this.imageSizeX = imageSizeX;
+      this.imageSizeY = imageSizeY;
+      this.cropRect = cropRect == null ? new RectF(0f, 0f, 1f, 1f) : new RectF(cropRect);
+      this.maintainAspect = maintainAspect;
+    }
+  }
+
   @Override
   public synchronized void onResume() {
+    inferenceErrorMessage = "";
+    inferenceStartup.reset();
     handlerThread = new HandlerThread("inference");
     handlerThread.start();
     handler = new Handler(handlerThread.getLooper());
     super.onResume();
+    retryNetworkConfigurationForCachedFrame();
+  }
+
+  void retryNetworkConfigurationForCachedFrame() {
+    if (latestCameraFrameWidth > 0 && latestCameraFrameHeight > 0) {
+      logInferenceStartup("resume_retry", "cached_frame_dimensions");
+      requestNetworkConfiguration(latestCameraFrameWidth, latestCameraFrameHeight);
+    }
   }
 
   @Override
@@ -590,7 +737,8 @@ public class BaseCartFollowFragment extends CameraFragment {
     onCartFollowPause();
     stopDiagnosticSession();
     modelConfigGeneration.incrementAndGet();
-    modelConfigPending = false;
+    inferenceStartup.reset();
+    latestCameraFrameReceivedMs = -1L;
     if (handlerThread == null) {
       InferenceResources stale = inferenceResources;
       inferenceResources = null;
@@ -643,8 +791,14 @@ public class BaseCartFollowFragment extends CameraFragment {
     super.onDestroy();
   }
 
-  protected synchronized void runInBackground(final Runnable r) {
-    if (handler != null) handler.post(r);
+  protected synchronized boolean runInBackground(final Runnable r) {
+    if (handler == null) return false;
+    try {
+      return handler.post(r);
+    } catch (RuntimeException error) {
+      Timber.w(error, "Inference task submission failed");
+      return false;
+    }
   }
 
   @Override
@@ -662,6 +816,9 @@ public class BaseCartFollowFragment extends CameraFragment {
   protected void processFrame(
       Bitmap bitmap, ImageProxy image, long receivedAtMs, long sensorTimestampNs, int rotation) {
     if (bitmap == null) return;
+    latestCameraFrameReceivedMs = receivedAtMs;
+    latestCameraFrameWidth = bitmap.getWidth();
+    latestCameraFrameHeight = bitmap.getHeight();
     InferenceResources resources = inferenceResources;
     if (resources == null
         || !resources.matches(
@@ -837,6 +994,7 @@ public class BaseCartFollowFragment extends CameraFragment {
                   currentState != FollowState.IDLE
                       && currentState != FollowState.CAPTURE_TARGET
                       && currentState != FollowState.LOCKED_PENDING_CONFIRM
+                      && currentState != FollowState.AUTO_POSITIONING
                       && currentState != FollowState.DISTANCE_CALIBRATION
                       && currentState != FollowState.STOP;
               boolean stale =
@@ -977,7 +1135,8 @@ public class BaseCartFollowFragment extends CameraFragment {
               }
               boolean holdIdentity = authorization != null && !authorization.authorized;
               Detector.Recognition initializationCandidate = largestPerson;
-              if (currentState == FollowState.DISTANCE_CALIBRATION) {
+              if (currentState == FollowState.AUTO_POSITIONING
+                  || currentState == FollowState.DISTANCE_CALIBRATION) {
                 TargetTrack lockedInitializationTrack = targetTrackManager.getLockedTrack();
                 initializationCandidate =
                     lockedInitializationTrack != null
@@ -1026,7 +1185,9 @@ public class BaseCartFollowFragment extends CameraFragment {
                       activeSensorOrientation,
                       receivedAtMs);
               if ((fr.state != FollowState.CAPTURE_TARGET
+                      && fr.state != FollowState.AUTO_POSITIONING
                       && fr.state != FollowState.DISTANCE_CALIBRATION
+                      && currentState != FollowState.AUTO_POSITIONING
                       && currentState != FollowState.DISTANCE_CALIBRATION)
                   || fr.distanceDiagnosticText == null
                   || fr.distanceDiagnosticText.isEmpty())
@@ -1448,7 +1609,9 @@ public class BaseCartFollowFragment extends CameraFragment {
     Detector.Recognition captureCandidate =
         fr.state == FollowState.CAPTURE_TARGET ? selectLargest(fr.persons) : null;
     Detector.Recognition calibrationCandidate =
-        fr.state == FollowState.DISTANCE_CALIBRATION ? fr.target : null;
+        fr.state == FollowState.DISTANCE_CALIBRATION
+                || fr.state == FollowState.AUTO_POSITIONING
+            ? fr.target : null;
     for (Detector.Recognition r : fr.persons) {
       if (r == null || r.getLocation() == null) continue;
       int colorType = COLOR_NORMAL;
@@ -1478,6 +1641,12 @@ public class BaseCartFollowFragment extends CameraFragment {
       } else if (r == fr.candidate) {
         colorType = COLOR_CANDIDATE;
       }
+      if (useReleaseTargetOverlay()
+          && r != captureCandidate
+          && r != calibrationCandidate
+          && r != pendingCandidate
+          && r != fr.target
+          && (track == null || !targetTrackManager.isLockedTrack(track))) continue;
       if (fr.simulatorIdentity != null
           && !fr.simulatorIdentity.authorized
           && !fr.simulatorIdentity.isContinuous()
@@ -1489,10 +1658,9 @@ public class BaseCartFollowFragment extends CameraFragment {
       if (r == captureCandidate) {
         label = "目标采集中 " + fr.initializationSampleCount + "/" + stateMachine.CAPTURE_FRAMES;
       } else if (r == calibrationCandidate) {
-        label =
-            "已确认 · 视觉参考标定 "
-                + fr.distanceCalibrationSampleCount
-                + "/"
+        label = fr.state == FollowState.AUTO_POSITIONING
+            ? fr.distanceDiagnosticText
+            : "已确认 · 视觉参考标定 " + fr.distanceCalibrationSampleCount + "/"
                 + TargetMemory.DISTANCE_CALIBRATION_SAMPLES;
       } else if (pendingConfirmation && r == pendingCandidate) {
         label = "待确认";
@@ -1520,6 +1688,7 @@ public class BaseCartFollowFragment extends CameraFragment {
                             ? "外观变化中 · 低档"
                             : green ? "连续保持" : permit.retainTarget ? "姿态适应中" : "身份存疑";
       }
+      if (useReleaseTargetOverlay()) label = colorType == COLOR_TARGET ? "目标已锁定" : "目标";
       boxes.add(new DrawBox(new RectF(r.getLocation()), colorType, label));
     }
     if (fr.detectionTierEvidence != null) {
@@ -1607,6 +1776,7 @@ public class BaseCartFollowFragment extends CameraFragment {
           return "疑似目标，请停止确认";
         case FOLLOW_SLOW:
         case FOLLOW_CAUTION:
+        case INITIALIZATION_REVERSE:
         default:
           break;
       }
@@ -1620,12 +1790,14 @@ public class BaseCartFollowFragment extends CameraFragment {
             : fr.distanceDiagnosticText;
       case LOCKED_PENDING_CONFIRM:
         return "请确认是否跟随此人";
+      case AUTO_POSITIONING:
+        return fr.distanceDiagnosticText == null ? "请保持站立" : fr.distanceDiagnosticText;
       case DISTANCE_CALIBRATION:
         return fr.distanceDiagnosticText == null || fr.distanceDiagnosticText.isEmpty()
             ? "已确认，正在视觉参考标定 · c0,0"
             : fr.distanceDiagnosticText + " · c0,0";
       case CONFIRMED_ARMED:
-        return "已确认，请回到车前";
+        return "视觉标定完成，正在身份复核";
       case REACQUIRE_TARGET:
         return "重识别中…";
       case READY_TO_FOLLOW:
@@ -1778,7 +1950,7 @@ public class BaseCartFollowFragment extends CameraFragment {
       return;
     }
     diagnosticSession = new CartFollowDiagnosticSession(requireContext().getApplicationContext());
-    diagnosticSession.mode = this instanceof RealCartFollowFragment ? "真实小车" : "HumanCartSimulator";
+    diagnosticSession.mode = diagnosticEntryName();
     diagnosticSession.initCsvFiles();
     diagnosticActive = true;
     loggedGalleryRevision = -1;
@@ -1972,6 +2144,7 @@ public class BaseCartFollowFragment extends CameraFragment {
         fr.initializationSampleCount,
         fr.initializationTrackId,
         fr.initializationDiscardReason,
+        fr.initializationPositioningEvidence,
         fr.distanceCalibrationSampleCount,
         fr.distanceCalibrationCompletedAtMs,
         fr.rangeTelemetry,
@@ -2252,7 +2425,8 @@ public class BaseCartFollowFragment extends CameraFragment {
             safety,
             stateMachine.getMemory(),
             frameW,
-            enhancedRecoveryEnabled ? fr.simulatorIdentity : null);
+            enhancedRecoveryEnabled ? fr.simulatorIdentity : null,
+            fr.initializationPositioningEvidence);
     return new BehaviorDecisionResult(
         decision.state,
         decision.selectedAction,
@@ -2265,6 +2439,27 @@ public class BaseCartFollowFragment extends CameraFragment {
 
   protected Model getModel() {
     return model;
+  }
+
+  DetectorModelResolver.Result initializeDetectorModel(
+      List<Model> detectorModels, String savedModelName) {
+    DetectorModelResolver.Result result =
+        DetectorModelResolver.resolve(detectorModels, savedModelName);
+    if (!result.available()) {
+      modelSelectionErrorMessage = result.error;
+      logInferenceStartup("model_resolution_failed", result.error);
+      return result;
+    }
+    modelSelectionErrorMessage = "";
+    setModel(result.model);
+    logInferenceStartup(
+        "model_resolved",
+        "model=" + result.model.name + ",source=" + (result.usedFallback ? "fallback" : "saved"));
+    return result;
+  }
+
+  void setDetectorLoaderForTest(DetectorLoader detectorLoader) {
+    this.detectorLoader = detectorLoader == null ? DetectorLoader.DEFAULT : detectorLoader;
   }
 
   private static Detector.Recognition selectLargest(List<Detector.Recognition> persons) {
@@ -2285,11 +2480,21 @@ public class BaseCartFollowFragment extends CameraFragment {
 
   @Override
   protected void setModel(Model model) {
-    if (this.model != model) {
-      this.model = model;
-      preferencesManager.setObjectNavModel(model.name);
-      onInferenceConfigurationChanged();
-    }
+    if (model == null || sameModelConfiguration(this.model, model)) return;
+    this.model = model;
+    modelSelectionErrorMessage = "";
+    preferencesManager.setObjectNavModel(model.name);
+    onInferenceConfigurationChanged();
+  }
+
+  private static boolean sameModelConfiguration(Model left, Model right) {
+    if (left == right) return true;
+    if (left == null || right == null) return false;
+    return java.util.Objects.equals(left.name, right.name)
+        && java.util.Objects.equals(left.path, right.path)
+        && left.pathType == right.pathType
+        && left.classType == right.classType
+        && left.type == right.type;
   }
 
   protected Network.Device getDevice() {
@@ -2322,6 +2527,18 @@ public class BaseCartFollowFragment extends CameraFragment {
 
   protected boolean isDetectorReady() {
     return inferenceResources != null;
+  }
+
+  protected String getInferenceErrorMessage() {
+    return modelSelectionErrorMessage.isEmpty()
+        ? inferenceErrorMessage
+        : modelSelectionErrorMessage;
+  }
+
+  protected boolean isCameraReady(long nowMs) {
+    return latestCameraFrameReceivedMs >= 0
+        && nowMs >= latestCameraFrameReceivedMs
+        && nowMs - latestCameraFrameReceivedMs <= 1000L;
   }
 
   private static final class InferenceResources {

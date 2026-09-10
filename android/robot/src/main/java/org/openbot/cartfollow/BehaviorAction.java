@@ -3,6 +3,7 @@ package org.openbot.cartfollow;
 public enum BehaviorAction {
   FOLLOW_SLOW,
   FOLLOW_CAUTION,
+  INITIALIZATION_REVERSE,
   MOTION_STOP,
   LOCAL_SEARCH_LEFT,
   LOCAL_SEARCH_RIGHT,
