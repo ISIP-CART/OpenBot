@@ -31,13 +31,16 @@ public class ShoppingFollowControllerTest {
     return session.status();
   }
   private FollowStateMachine.FrameResult frame(long now,float width,float error,float rate,boolean visible) {
+    return frame(now,width,error,rate,visible,1);
+  }
+  private FollowStateMachine.FrameResult frame(long now,float width,float error,float rate,boolean visible,int trackId) {
     FollowStateMachine.FrameResult f=new FollowStateMachine.FrameResult(visible?FollowState.FOLLOW:FollowState.IDENTITY_UNCERTAIN,
         new Control(0,0),null,null,new ArrayList<>(visible?Collections.singletonList(null):Collections.emptyList()),visible,false,null,0);
     f.frameSequence=++sequence; f.frameTiming=new FrameTimingEvidence(now,0,0,0,0,0,0,0);
     f.behaviorDecision=new BehaviorDecisionResult(f.state,visible?BehaviorAction.FOLLOW_SLOW:BehaviorAction.MOTION_STOP,"test",null,1);
-    f.simulatorIdentity=new SimulatorIdentityGuard.Decision(visible,false,1,3,"verified");
+    f.simulatorIdentity=new SimulatorIdentityGuard.Decision(visible,false,trackId,3,"verified");
     if(visible) {
-      f.targetObservation=new TargetObservationEvidence(new RectF(.5f+error/2-width/2,-.2f,.5f+error/2+width/2,1.2f),1,now,1,false,true,1,"test");
+      f.targetObservation=new TargetObservationEvidence(new RectF(.5f+error/2-width/2,-.2f,.5f+error/2+width/2,1.2f),trackId,now,1,false,true,1,"test");
       f.steeringEvidence=new SteeringEvidence(true,"test",error,error,rate,error,0,20,
           Math.abs(error)<.06f?SteeringEvidence.Direction.NONE:error>0?SteeringEvidence.Direction.RIGHT:SteeringEvidence.Direction.LEFT,
           SteeringEvidence.Level.SLIGHT,0);
@@ -50,14 +53,42 @@ public class ShoppingFollowControllerTest {
   }
   @Test public void widthCanAdvanceBeyondFullBodyReferenceAndStopsAtCloseWidth() {
     ShoppingFollowController.Output out=null;
-    for(int i=0;i<6;i++) out=step(i*100,.4f,0,0,true,900,900,900,0,false);
-    assertTrue(out.left>0 && out.right>0); assertTrue(out.left<=14);
-    for(int i=6;i<20;i++) out=step(i*100,.6f,0,0,true,900,900,900,0,false);
+    for(int i=0;i<6;i++) out=step(i*100,.5f,0,0,true,900,900,900,0,false);
+    assertTrue(out.left>0 && out.right>0); assertTrue(out.left<=18);
+    for(int i=6;i<24;i++) out=step(i*100,.70f,0,0,true,900,900,900,0,false);
     assertEquals("width_hold",out.reason); assertEquals(0,out.left);
-    for(int i=20;i<27;i++) out=step(i*100,.5f,0,0,true,900,900,900,0,false);
+    for(int i=24;i<31;i++) out=step(i*100,.60f,0,0,true,900,900,900,0,false);
     assertEquals(0,out.left);
-    for(int i=27;i<40;i++) out=step(i*100,.4f,0,0,true,900,900,900,0,false);
+    for(int i=31;i<44;i++) out=step(i*100,.50f,0,0,true,900,900,900,0,false);
     assertTrue(out.left>0);
+    assertTrue(controller.diagnostic().contains("width_start=0.55"));
+    assertTrue(controller.diagnostic().contains("width_stop=0.65"));
+  }
+  @Test public void closeFollowGearBandsAreReportedBeforeSafetyCaps() {
+    float[] widths={.30f,.45f,.525f,.575f,.625f}; int[] gears={21,18,14,10,8};
+    for(int j=0;j<widths.length;j++) {
+      controller=new ShoppingFollowController(); session=new R3TelemetrySession(); sequence=0;
+      for(int i=0;i<5;i++) step(i*100,widths[j],0,0,true,900,900,900,0,false);
+      assertTrue(controller.diagnostic().contains("desired_gear="+gears[j]));
+    }
+  }
+  @Test public void exactCloseStopAndResumeHysteresisRemainBounded() {
+    ShoppingFollowController.Output out=null;
+    for(int i=0;i<5;i++) out=step(i*100,.65f,0,0,true,900,900,900,0,false);
+    assertEquals("width_hold",out.reason);assertEquals(0,out.left);
+    for(int i=5;i<25;i++) out=step(i*100,.55f,0,0,true,900,900,900,0,false);
+    assertEquals(0,out.left);
+    for(int i=25;i<55;i++) out=step(i*100,.549f,0,0,true,900,900,900,0,false);
+    assertTrue(out.left>0&&out.right>0);
+  }
+  @Test public void leftAndRightClippingNeverProduceForwardTranslation() {
+    for(float error:new float[]{-.65f,.65f}) {
+      controller=new ShoppingFollowController();session=new R3TelemetrySession();sequence=0;
+      ShoppingFollowController.Output out=null;
+      for(int i=0;i<5;i++) out=step(i*100,.45f,error,0,true,900,900,900,0,false);
+      assertEquals(0,out.left+out.right);
+      assertTrue(out.reason.startsWith("shopping_visible_aim")||out.reason.equals("width_unreliable"));
+    }
   }
   @Test public void suddenBodyNarrowingDoesNotTriggerAcceleration() {
     for(int i=0;i<6;i++) step(i*100,.5f,0,0,true,900,900,900,0,false);
@@ -176,6 +207,32 @@ public class ShoppingFollowControllerTest {
     }
     safety.latchEmergency();assertTrue(safety.refresh(550,null).isStop());
   }
+  @Test public void globalIdentityEvidenceHandsAuthorizedNewTrackToRealMotionAfterThreeFrames() {
+    RealCartSafetyController safety=readySafety();
+    for(int i=0;i<5;i++) {
+      long now=i*100;safety.setShoppingEnvironment(ranges(now,900,900,900),0,true,false);
+      safety.auto(frame(now,.35f,0,0,true,1),now);
+    }
+    SimulatorIdentityGuard guard=new SimulatorIdentityGuard();guard.begin(7);
+    SimulatorIdentityGuard.Decision permit=null;
+    for(int i=1;i<=5;i++) {
+      long now=500+i*300; long observation=100+i;
+      ReIDMatchResult score=new ReIDMatchResult(.97f,.10f,0,8,true,30,"fresh",.80f,.97f,observation)
+          .withBinding(2,now,i,true,0,false);
+      permit=guard.update(7,i,now,now,2,1,true,false,score,1,false,true,score,null,true);
+      assertEquals(i==5,permit.authorized);
+      FollowStateMachine.FrameResult candidate=frame(now,.35f,0,0,true,2);
+      candidate.simulatorIdentity=permit;
+      safety.setShoppingEnvironment(ranges(now,900,900,900),0,true,false);
+      assertTrue(safety.auto(candidate,now).isStop());
+    }
+    for(int i=0;i<2;i++) {
+      long now=2100+i*100; FollowStateMachine.FrameResult authorized=frame(now,.35f,0,0,true,2);
+      authorized.simulatorIdentity=permit;safety.setShoppingEnvironment(ranges(now,900,900,900),0,true,false);
+      RealCartSafetyController.Output out=safety.auto(authorized,now);
+      if(i==0) assertTrue(out.isStop()); else assertTrue(out.left>0&&out.right>0);
+    }
+  }
   @Test public void schedulerCameraWatchdogStopsCornerException() {
     RealCartSafetyController safety=readySafety();
     for(int i=0;i<6;i++) {
@@ -194,11 +251,16 @@ public class ShoppingFollowControllerTest {
   }
   @Test public void newIdentityCannotUseOriginalCornerPermission() {
     corner(1,true); step(1400,0,0,0,false,900,900,900,0,true);
-    FollowStateMachine.FrameResult f=frame(1500,.4f,0,0,true);
-    f.simulatorIdentity=new SimulatorIdentityGuard.Decision(true,false,2,3,"other");
+    FollowStateMachine.FrameResult f=frame(1500,.4f,0,0,true,2);
     controller.environment(ranges(1500,900,900,900),-10,true,true);
     assertEquals(0,controller.update(f,1500).left);
     assertFalse(controller.exploring());
+    f=frame(1600,.4f,0,0,true,2); controller.environment(ranges(1600,900,900,900),-10,true,true);
+    assertEquals(0,controller.update(f,1600).left);
+    f=frame(1700,.4f,0,0,true,2); controller.environment(ranges(1700,900,900,900),-10,true,true);
+    assertTrue(controller.update(f,1700).left>0);
+    assertFalse(controller.exploring());
+    assertTrue(controller.diagnostic().contains("gear_reset_reason=authorized_track_handoff"));
   }
   @Test public void shelfEvidenceExpiresBeforeAnUnrelatedLoss() {
     corner(1,true);

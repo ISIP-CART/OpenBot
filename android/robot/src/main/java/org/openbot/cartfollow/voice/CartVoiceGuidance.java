@@ -7,9 +7,13 @@ import org.openbot.cartfollow.FollowStateMachine;
 /** Shared non-blocking guidance. Speech never gates perception or motion. */
 public final class CartVoiceGuidance {
   public enum Event { EMERGENCY, DISCONNECTED, USER_STOP }
-  private final VoiceGuidancePlanner planner=new VoiceGuidancePlanner();
+  private final VoiceGuidancePlanner planner;
   private final SystemChineseSpeech speech=new SystemChineseSpeech();
   private boolean systemLatched;
+  public CartVoiceGuidance(){this(false);}
+  public CartVoiceGuidance(boolean automaticConfirmation){
+    planner=new VoiceGuidancePlanner(automaticConfirmation);
+  }
   public void start(Context context){speech.start(context);}
   public void speakWelcome(int textRes){if(!systemLatched)speech.speak(new VoiceGuidancePlanner.Prompt(textRes,false));}
   public void newSession(){systemLatched=false;planner.reset();}

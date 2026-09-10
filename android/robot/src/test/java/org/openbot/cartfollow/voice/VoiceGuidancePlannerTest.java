@@ -33,7 +33,28 @@ public class VoiceGuidancePlannerTest {
     VoiceGuidancePlanner.Prompt e=new VoiceGuidancePlanner().system(VoicePrompts.EMERGENCY,"emergency");
     assertTrue(e.urgent); assertEquals(VoicePrompts.EMERGENCY,e.textRes);
   }
+  @Test public void automaticFlowSkipsConfirmationAndUsesReleasePrompts() {
+    VoiceGuidancePlanner p=new VoiceGuidancePlanner(true);
+    assertNull(p.onFrame(frame(FollowState.LOCKED_PENDING_CONFIRM),0));
+    FollowStateMachine.FrameResult f=frame(FollowState.AUTO_POSITIONING);
+    f.initializationPositioningEvidence=InitializationPositioningEvidence.stage(
+        InitializationPositioningEvidence.Phase.WAIT_STABLE,"waiting_stable");
+    assertEquals(VoicePrompts.AUTO_POSITIONING,p.onFrame(f,100).textRes);
+    f.initializationPositioningEvidence=InitializationPositioningEvidence.stage(
+        InitializationPositioningEvidence.Phase.TIMEOUT,"reverse_timeout");
+    assertEquals(VoicePrompts.AUTO_POSITIONING_TIMEOUT,p.onFrame(f,200).textRes);
+  }
   @Test public void everyPromptUsesImmediateReplacementQueue() {
     assertEquals(TextToSpeech.QUEUE_FLUSH,SystemChineseSpeech.queueMode());
+  }
+  @Test public void followStateDoesNotAnnounceFollowingWhileIdentityMotionIsBlocked() throws Exception {
+    FollowStateMachine.FrameResult f=frame(FollowState.FOLLOW);
+    java.lang.reflect.Constructor<SimulatorIdentityGuard.Decision> c=
+        SimulatorIdentityGuard.Decision.class.getDeclaredConstructor(
+            boolean.class,boolean.class,int.class,int.class,String.class);
+    c.setAccessible(true);
+    f.simulatorIdentity=c.newInstance(false,false,1,0,"global_reid_cached_hold");
+    assertEquals(VoicePrompts.IDENTITY_UNCERTAIN,
+        new VoiceGuidancePlanner(true).onFrame(f,0).textRes);
   }
 }

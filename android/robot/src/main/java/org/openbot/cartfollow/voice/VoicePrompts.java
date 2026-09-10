@@ -7,9 +7,11 @@ final class VoicePrompts {
   static final int CAPTURE = R.string.voice_cart_capture;
   static final int CONFIRM = R.string.voice_cart_confirm;
   static final int POSITIONING = R.string.voice_cart_positioning;
+  static final int AUTO_POSITIONING = R.string.shopping_cart_auto_positioning;
   static final int POSITIONING_REVERSE = R.string.voice_cart_positioning_reverse;
   static final int POSITIONING_INTERRUPTED = R.string.voice_cart_positioning_interrupted;
   static final int POSITIONING_TIMEOUT = R.string.voice_cart_positioning_timeout;
+  static final int AUTO_POSITIONING_TIMEOUT = R.string.shopping_cart_auto_positioning_timeout;
   static final int CALIBRATION = R.string.voice_cart_calibration;
   static final int CALIBRATION_CLIPPED = R.string.voice_cart_clipped;
   static final int REACQUIRE = R.string.voice_cart_reacquire;

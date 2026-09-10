@@ -329,7 +329,9 @@ public class SimulatorFrameProcessingTest {
           machine.onFrame(
               Collections.singletonList(person), frame, 100, 200, 0, null, null, locked);
     }
-    assertEquals(FollowState.CONFIRMED_ARMED, result.state);
+    assertEquals(FollowState.READY_TO_FOLLOW, result.state);
+    assertTrue(result.initializationContinuityAccepted);
+    assertTrue(result.initializationContinuityValid);
     assertTrue(machine.getMemory().hasDistanceSetpoint());
     assertTrue(machine.getMemory().getDistanceCalibrationCompletedAtMs() > 0);
     assertEquals(0f, result.control.getLeft(), 0f);
@@ -367,6 +369,33 @@ public class SimulatorFrameProcessingTest {
     assertEquals(0, simulator.right);
     assertTrue(real.isStop());
     assertEquals(BehaviorAction.MOTION_STOP, frame.behaviorDecision.selectedAction);
+  }
+
+  @Test
+  public void missingConfirmedTargetInvalidatesInitializationContinuityAndUsesStrictReview() {
+    TestClockMachine machine = new TestClockMachine();
+    machine.CAPTURE_FRAMES = 1;
+    Bitmap frame = Bitmap.createBitmap(100, 200, Bitmap.Config.ARGB_8888);
+    Recognition person = new Recognition("1", "person", .9f, new RectF(20, 20, 80, 170), 0);
+    FollowStateMachine.InitializationObservation locked =
+        new FollowStateMachine.InitializationObservation(person, 7, true);
+    machine.startCapture();
+    machine.onFrame(Collections.singletonList(person), frame, 100, 200, 0, null, null, locked);
+    machine.confirm(7);
+    machine.now = 0;
+    FollowStateMachine.FrameResult missing =
+        machine.onFrame(
+            Collections.emptyList(),
+            frame,
+            100,
+            200,
+            0,
+            null,
+            null,
+            new FollowStateMachine.InitializationObservation(null, -1, false));
+    assertFalse(missing.initializationContinuityValid);
+    assertEquals("confirmed_target_missing", missing.initializationContinuityReason);
+    frame.recycle();
   }
 
   @Test

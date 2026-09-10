@@ -47,6 +47,23 @@ public class ReIDCoordinator {
   private final Map<Integer, ReIDMatchResult> globalScoredTracks = new HashMap<>();
   private DeferredGallerySegment.Result deferredResult;
   private long gallerySession;
+  private boolean initializationSupplementOpen;
+  private int initializationSupplementTrack = -1;
+  private int initializationSupplementCount;
+  private long initializationSupplementLastFrame = -1L;
+  private long initializationSupplementLastAtMs = -1L;
+
+  public static final class InitializationSampleResult {
+    public final boolean accepted;
+    public final String reason;
+    public final int sampleCount;
+
+    InitializationSampleResult(boolean accepted, String reason, int sampleCount) {
+      this.accepted = accepted;
+      this.reason = reason;
+      this.sampleCount = sampleCount;
+    }
+  }
 
   public synchronized long getSessionEpoch() {
     return gallerySession;
@@ -127,9 +144,17 @@ public class ReIDCoordinator {
               .put("approved_after_frame", source.approvedAfterFrame)
               .put("approval", source.approvalReason)
               .put("quarantine_source", source.quarantinePromotion)
-              .put("min_samples", 3)
-              .put("min_span_ms", 600)
-              .put("min_adjacent_similarity", .75);
+              .put(
+                  "min_samples",
+                  "initialization_continuity".equals(source.approvalReason) ? 1 : 3)
+              .put(
+                  "min_span_ms",
+                  "initialization_continuity".equals(source.approvalReason) ? 0 : 600)
+              .put(
+                  "min_adjacent_similarity",
+                  "initialization_continuity".equals(source.approvalReason)
+                      ? org.json.JSONObject.NULL
+                      : .75);
         rows.add(row.toString());
       } catch (org.json.JSONException ignored) {
         /* Primitive finite metadata only. */
@@ -326,6 +351,7 @@ public class ReIDCoordinator {
 
   public synchronized void reset() {
     gallerySession++;
+    resetInitializationSupplement(false);
     learningTrackId = -1;
     globalScoredTracks.clear();
     recentMatchingSupport = false;
@@ -387,6 +413,7 @@ public class ReIDCoordinator {
 
   public synchronized void setGalleryMode(GalleryUpdateStatus.Mode mode) {
     gallerySession++;
+    resetInitializationSupplement(false);
     globalScoredTracks.clear();
     scoredTracks.clear();
     recentGallery.clear();
@@ -476,19 +503,111 @@ public class ReIDCoordinator {
 
   public synchronized void confirmGallery() {
     gallerySession++;
+    resetInitializationSupplement(true);
     confirmedGallery.clear();
-    if (pendingGallery.isEmpty()) return;
-    for (float[] feature : selectDiverse(pendingGallery, CONFIRMED_GALLERY_K)) {
-      confirmedGallery.add(feature);
-    }
     adaptiveGallery.clear();
     provenance.clear();
     clearQuarantine();
     clearPendingAdaptive();
+    if (pendingGallery.isEmpty()) {
+      updateGalleryStatus("confirmed", "anchor_gallery_empty", 0f, 0f, 0f);
+      lastResult = ReIDMatchResult.unavailable("gallery_empty", 0);
+      return;
+    }
+    for (float[] feature : selectDiverse(pendingGallery, CONFIRMED_GALLERY_K)) {
+      confirmedGallery.add(feature);
+    }
     updateGalleryStatus("confirmed", "anchor_confirmed", 0f, 0f, 0f);
     lastResult =
         ReIDMatchResult.unavailable(
             isAvailable() ? "gallery_confirmed" : disabledReason, getGallerySize());
+  }
+
+  /** Adds a post-positioning appearance of the exact confirmed track without self-verification. */
+  public InitializationSampleResult collectConfirmedInitializationCandidate(
+      Bitmap frame,
+      Recognition candidate,
+      int sensorOrientation,
+      int trackId,
+      int confirmedTrackId,
+      long receivedAtMs,
+      long sourceFrame,
+      long expectedSession) {
+    if (!isAvailable()) return initializationSampleResult(false, "reid_unavailable");
+    if (frame == null || candidate == null || candidate.getLocation() == null)
+      return initializationSampleResult(false, "candidate_missing");
+    final long sampleSession;
+    synchronized (this) {
+      sampleSession = gallerySession;
+      if (!initializationSupplementOpen) return initializationSampleResult(false, "sampling_closed");
+      if (sampleSession != expectedSession) return initializationSampleResult(false, "session_changed");
+      if (trackId < 0 || trackId != confirmedTrackId)
+        return initializationSampleResult(false, "confirmed_track_mismatch");
+      if (initializationSupplementTrack >= 0 && initializationSupplementTrack != trackId)
+        return initializationSampleResult(false, "supplement_track_changed");
+      if (initializationSupplementCount >= MAX_ADAPTIVE_GALLERY)
+        return initializationSampleResult(false, "sample_limit_reached");
+      if (sourceFrame <= initializationSupplementLastFrame)
+        return initializationSampleResult(false, "duplicate_frame");
+      if (initializationSupplementLastAtMs >= 0L
+          && receivedAtMs - initializationSupplementLastAtMs < 200L)
+        return initializationSampleResult(false, "sample_interval");
+      if (receivedAtMs < 0L || SystemClock.elapsedRealtime() - receivedAtMs > 500L)
+        return initializationSampleResult(false, "sample_stale");
+    }
+    Bitmap crop = cropPerson(frame, candidate.getLocation(), 0.08f, sensorOrientation);
+    float[] feature;
+    try {
+      feature = extractor.extract(crop);
+    } finally {
+      crop.recycle();
+    }
+    synchronized (this) {
+      if (!initializationSupplementOpen || gallerySession != sampleSession)
+        return initializationSampleResult(false, "session_changed");
+      if (trackId != confirmedTrackId
+          || (initializationSupplementTrack >= 0 && initializationSupplementTrack != trackId))
+        return initializationSampleResult(false, "supplement_track_changed");
+      if (feature == null) return initializationSampleResult(false, "feature_missing");
+      if (!insertDiverseAdaptive(feature))
+        return initializationSampleResult(false, "no_diversity_capacity");
+      initializationSupplementTrack = trackId;
+      initializationSupplementLastFrame = sourceFrame;
+      initializationSupplementLastAtMs = receivedAtMs;
+      initializationSupplementCount++;
+      adaptiveRevision++;
+      provenance.put(
+          feature,
+          new GallerySampleProvenance(
+              trackId,
+              sourceFrame,
+              sourceFrame,
+              receivedAtMs,
+              false,
+              true,
+              sourceFrame,
+              "initialization_continuity"));
+      provenance.keySet().retainAll(adaptiveGallery);
+      updateGalleryStatus("initialization", "initialization_sample_added", 0f, 0f, 0f);
+      return initializationSampleResult(true, "initialization_sample_added");
+    }
+  }
+
+  public synchronized void closeInitializationSupplement() {
+    initializationSupplementOpen = false;
+  }
+
+  private synchronized InitializationSampleResult initializationSampleResult(
+      boolean accepted, String reason) {
+    return new InitializationSampleResult(accepted, reason, initializationSupplementCount);
+  }
+
+  private void resetInitializationSupplement(boolean open) {
+    initializationSupplementOpen = open;
+    initializationSupplementTrack = -1;
+    initializationSupplementCount = 0;
+    initializationSupplementLastFrame = -1L;
+    initializationSupplementLastAtMs = -1L;
   }
 
   public IdentityEvidence evaluate(

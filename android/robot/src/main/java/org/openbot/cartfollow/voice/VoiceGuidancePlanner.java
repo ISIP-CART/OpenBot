@@ -16,7 +16,14 @@ final class VoiceGuidancePlanner {
     Prompt(int textRes, boolean urgent, String key) { this.textRes=textRes; this.urgent=urgent; this.key=key; }
   }
   private final Map<String, Long> spokenAt = new HashMap<>();
+  private final boolean automaticConfirmation;
   private String previousKey = "idle";
+
+  VoiceGuidancePlanner() { this(false); }
+
+  VoiceGuidancePlanner(boolean automaticConfirmation) {
+    this.automaticConfirmation = automaticConfirmation;
+  }
 
   Prompt onFrame(FollowStateMachine.FrameResult frame, long nowMs) {
     if (frame == null || frame.state == null) return null;
@@ -36,7 +43,12 @@ final class VoiceGuidancePlanner {
   private Prompt candidate(FollowStateMachine.FrameResult frame) {
     InitializationPositioningEvidence p = frame.initializationPositioningEvidence;
     if (p != null && p.phase == InitializationPositioningEvidence.Phase.TIMEOUT)
-      return new Prompt(VoicePrompts.POSITIONING_TIMEOUT,true,"positioning_timeout");
+      return new Prompt(
+          automaticConfirmation
+              ? VoicePrompts.AUTO_POSITIONING_TIMEOUT
+              : VoicePrompts.POSITIONING_TIMEOUT,
+          true,
+          "positioning_timeout");
     if (frame.state == FollowState.AUTO_POSITIONING && p != null) {
       switch (p.phase) {
         case REVERSING: return new Prompt(VoicePrompts.POSITIONING_REVERSE,false,"positioning_reverse");
@@ -44,18 +56,31 @@ final class VoiceGuidancePlanner {
         case READY: return new Prompt(VoicePrompts.CALIBRATION,false,"initializing_full_body");
         default:
           boolean interrupted=p.reason!=null&&(p.reason.contains("missing")||p.reason.contains("competing")||p.reason.contains("track"));
-          return new Prompt(interrupted?VoicePrompts.POSITIONING_INTERRUPTED:VoicePrompts.POSITIONING,
+          return new Prompt(
+              interrupted
+                  ? VoicePrompts.POSITIONING_INTERRUPTED
+                  : automaticConfirmation
+                      ? VoicePrompts.AUTO_POSITIONING
+                      : VoicePrompts.POSITIONING,
               interrupted,interrupted?"positioning_interrupted":"positioning_wait");
       }
     }
     switch (frame.state) {
       case CAPTURE_TARGET: return new Prompt(VoicePrompts.CAPTURE,false,"capture");
-      case LOCKED_PENDING_CONFIRM: return new Prompt(VoicePrompts.CONFIRM,false,"confirm");
+      case LOCKED_PENDING_CONFIRM:
+        return automaticConfirmation ? null : new Prompt(VoicePrompts.CONFIRM,false,"confirm");
       case DISTANCE_CALIBRATION:
       case CONFIRMED_ARMED:
       case REACQUIRE_TARGET: return new Prompt(VoicePrompts.CALIBRATION,false,"initializing_full_body");
       case READY_TO_FOLLOW: return new Prompt(VoicePrompts.COUNTDOWN,false,"countdown");
-      case FOLLOW: return new Prompt(VoicePrompts.FOLLOW,false,"follow");
+      case FOLLOW:
+      case FOLLOW_CAUTION:
+        if (frame.simulatorIdentity != null
+            && (!frame.simulatorIdentity.motionAllowed
+                || (!frame.simulatorIdentity.authorized
+                    && !frame.simulatorIdentity.isContinuous())))
+          return new Prompt(VoicePrompts.IDENTITY_UNCERTAIN,true,"identity_uncertain");
+        return new Prompt(VoicePrompts.FOLLOW,false,"follow");
       case IDENTITY_UNCERTAIN: return new Prompt(VoicePrompts.IDENTITY_UNCERTAIN,true,"identity_uncertain");
       case LOST: return new Prompt(VoicePrompts.LOST,true,"lost");
       case SEARCH:

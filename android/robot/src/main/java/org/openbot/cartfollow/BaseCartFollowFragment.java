@@ -130,6 +130,10 @@ public class BaseCartFollowFragment extends CameraFragment {
   private volatile long latestCameraFrameReceivedMs = -1L;
   private volatile int latestCameraFrameWidth;
   private volatile int latestCameraFrameHeight;
+  private String lastInitializationContinuityEvent = "";
+  private String lastInitializationGalleryEvent = "";
+  private String lastIdentityPermissionEvent = "";
+  private int lastIdentityPermissionTrack = -1;
 
   private final List<DrawBox> drawBoxes = new ArrayList<>();
   private int drawFrameWidth = 0;
@@ -280,22 +284,12 @@ public class BaseCartFollowFragment extends CameraFragment {
           }
           int lockedTrackId =
               targetTrackManager.lockClosest(stateMachine.getMemory().getLastBbox());
-          if (lockedTrackId < 0) {
-            recordControlEvent("target_confirm_failed", "locked_track_unavailable");
+          if (!completeTargetConfirmation(
+              lockedTrackId, latestConfirmSnapshot, lastPresentedPersons, false)) {
             updateCommandText("目标轨迹已失效，请重拍");
             return;
           }
-          if (reidCoordinator != null) reidCoordinator.confirmGallery();
-          beliefAccumulator.lockTrack(lockedTrackId);
-          activateDiagnosticSession();
-          if (diagnosticActive && diagnosticSession != null && latestConfirmSnapshot != null) {
-            diagnosticSaver.saveGallerySnapshotAsync(
-                latestConfirmSnapshot, diagnosticSession, "confirmed_snapshot");
-          }
-          recordControlEvent("target_confirmed", "locked_track=" + lockedTrackId);
-          stateMachine.confirm(lockedTrackId);
           invalidatePendingUiSnapshots();
-          if (enhancedRecoveryEnabled) rememberDistractors(lockedTrackId, lastPresentedPersons);
           binding.confirmPanel.setVisibility(View.GONE);
           binding.countdownText.setVisibility(View.GONE);
           updateCommandText("已确认，请保持站立");
@@ -359,6 +353,9 @@ public class BaseCartFollowFragment extends CameraFragment {
   }
 
   protected boolean useReleaseTargetOverlay() { return false; }
+
+  /** Release screens may confirm the exact captured track without a later UI interaction. */
+  protected boolean autoConfirmCapturedTarget() { return false; }
 
   protected void onDiagnosticWriteFailure(String error) {}
 
@@ -471,6 +468,10 @@ public class BaseCartFollowFragment extends CameraFragment {
     resetRecoveryRelock();
     steeringDemandEstimator.reset();
     lastSteeringObservationMs = -1L;
+    lastInitializationContinuityEvent = "";
+    lastInitializationGalleryEvent = "";
+    lastIdentityPermissionEvent = "";
+    lastIdentityPermissionTrack = -1;
     onFollowSessionReset();
     stopDiagnosticSession();
     stateMachine.cancel();
@@ -503,6 +504,62 @@ public class BaseCartFollowFragment extends CameraFragment {
     boolean visible = shouldShowConfirmation(startChecked, state);
     confirmPanel.setVisibility(visible ? View.VISIBLE : View.GONE);
     return visible;
+  }
+
+  private boolean completeTargetConfirmation(
+      int lockedTrackId,
+      Bitmap snapshot,
+      List<Detector.Recognition> persons,
+      boolean automatic) {
+    if (lockedTrackId < 0) {
+      recordControlEvent(
+          automatic ? "target_auto_confirm_failed" : "target_confirm_failed",
+          "locked_track_unavailable");
+      return false;
+    }
+    if (reidCoordinator != null) reidCoordinator.confirmGallery();
+    beliefAccumulator.lockTrack(lockedTrackId);
+    activateDiagnosticSession();
+    if (diagnosticActive && diagnosticSession != null && snapshot != null) {
+      diagnosticSaver.saveGallerySnapshotAsync(
+          snapshot,
+          diagnosticSession,
+          automatic ? "auto_confirmed_snapshot" : "confirmed_snapshot");
+    }
+    recordControlEvent(
+        automatic ? "target_auto_confirmed" : "target_confirmed",
+        "locked_track=" + lockedTrackId);
+    stateMachine.confirm(lockedTrackId);
+    if (enhancedRecoveryEnabled) rememberDistractors(lockedTrackId, persons);
+    return true;
+  }
+
+  FollowStateMachine.FrameResult applyAutomaticConfirmation(
+      FollowStateMachine.FrameResult captured,
+      FollowStateMachine.InitializationObservation observation,
+      List<Detector.Recognition> persons,
+      IdentityEvidence identity) {
+    if (!autoConfirmCapturedTarget()
+        || captured.state != FollowState.LOCKED_PENDING_CONFIRM) return captured;
+    int trackId = observation == null ? -1 : observation.trackId;
+    boolean locked =
+        trackId >= 0 && targetTrackManager.lockTrack(trackId, "capture_auto_confirm");
+    if (locked && completeTargetConfirmation(trackId, captured.snapshot, persons, true)) {
+      FollowStateMachine.FrameResult confirmed = stateMachine.observationOnly(persons, identity);
+      confirmed.distanceDiagnosticText = "目标采集完成，请保持站立";
+      return confirmed;
+    }
+    recordControlEvent(
+        "target_auto_confirm_failed",
+        "captured_track=" + trackId + ";reason=exact_track_unavailable;action=recapture");
+    if (reidCoordinator != null) reidCoordinator.reset();
+    targetTrackManager.reset();
+    beliefAccumulator.reset();
+    resetRecoveryRelock();
+    stateMachine.retake();
+    FollowStateMachine.FrameResult retry = stateMachine.observationOnly(persons, null);
+    retry.distanceDiagnosticText = "目标轨迹已失效，正在重新采集";
+    return retry;
   }
 
   protected final void resetUiToIdle() {
@@ -1059,7 +1116,10 @@ public class BaseCartFollowFragment extends CameraFragment {
                 if (identity != null
                     && candidateTrack != null
                     && continuity.observedGeometry != null) {
-                  local = continuity.reliable || "continuity_warming".equals(continuity.reason);
+                  local =
+                      local
+                          || continuity.reliable
+                          || "continuity_warming".equals(continuity.reason);
                   identity =
                       identity.forSimulatorCandidate(
                           candidateTrack,
@@ -1103,6 +1163,46 @@ public class BaseCartFollowFragment extends CameraFragment {
                         stateMachine.hasFollowedInSession());
                 if (!followPolicy.continuityMotion)
                   authorization = authorization.withoutContinuityMotion();
+                String identityPermissionEvent =
+                    authorization.trackId
+                        + ":"
+                        + authorization.state
+                        + ":"
+                        + authorization.motionAllowed
+                        + ":"
+                        + authorization.reason;
+                if (!identityPermissionEvent.equals(lastIdentityPermissionEvent)) {
+                  recordControlEvent(
+                      "identity_permission_changed",
+                      "old_track="
+                          + lastIdentityPermissionTrack
+                          + ";new_track="
+                          + authorization.trackId
+                          + ";locked_track="
+                          + targetTrackManager.getLockedTrackId()
+                          + ";state="
+                          + authorization.state
+                          + ";motion_allowed="
+                          + authorization.motionAllowed
+                          + ";retain_target="
+                          + authorization.retainTarget
+                          + ";high_count="
+                          + mappedRecognitions.size()
+                          + ";low_count="
+                          + continuedLowConfidence.size()
+                          + ";association_competing="
+                          + targetTrackManager.isLockedAssociationCompeting()
+                          + ";continuity="
+                          + authorization.continuityReason
+                          + ";recovery="
+                          + authorization.recoveryType
+                          + ";hold_remaining_ms="
+                          + authorization.holdRemainingMs
+                          + ";reason="
+                          + authorization.reason);
+                  lastIdentityPermissionEvent = identityPermissionEvent;
+                  lastIdentityPermissionTrack = authorization.trackId;
+                }
                 if (reidCoordinator != null)
                   reidCoordinator.setAutomaticVerification(
                       !authorization.authorized && !authorization.isContinuous());
@@ -1133,10 +1233,15 @@ public class BaseCartFollowFragment extends CameraFragment {
                     && (!local || currentState == FollowState.DIRECTED_REACQUIRE))
                   stateMachine.acceptSimulatorRecovery(authorization, identity.bestCandidate);
               }
-              boolean holdIdentity = authorization != null && !authorization.authorized;
+              boolean initializationCountdown =
+                  currentState == FollowState.READY_TO_FOLLOW
+                      && !stateMachine.hasFollowedInSession();
+              boolean holdIdentity =
+                  authorization != null && !authorization.authorized && !initializationCountdown;
               Detector.Recognition initializationCandidate = largestPerson;
               if (currentState == FollowState.AUTO_POSITIONING
-                  || currentState == FollowState.DISTANCE_CALIBRATION) {
+                  || currentState == FollowState.DISTANCE_CALIBRATION
+                  || initializationCountdown) {
                 TargetTrack lockedInitializationTrack = targetTrackManager.getLockedTrack();
                 initializationCandidate =
                     lockedInitializationTrack != null
@@ -1151,7 +1256,8 @@ public class BaseCartFollowFragment extends CameraFragment {
                   new FollowStateMachine.InitializationObservation(
                       initializationCandidate,
                       initializationTrack == null ? -1 : initializationTrack.trackId,
-                      mappedRecognitions.size() == 1);
+                      mappedRecognitions.size() == 1,
+                      targetTrackManager.isLockedAssociationCompeting());
               FollowStateMachine.FrameResult fr =
                   !stale && holdIdentity && authorization.retainTarget
                       ? stateMachine.continuityFrame(
@@ -1172,6 +1278,97 @@ public class BaseCartFollowFragment extends CameraFragment {
                               identity,
                               enhancedRecoveryEnabled ? legacyMatch : null,
                               initializationObservation);
+              if (currentState == FollowState.CAPTURE_TARGET) {
+                fr =
+                    applyAutomaticConfirmation(
+                        fr, initializationObservation, mappedRecognitions, identity);
+              }
+              if (fr.initializationContinuityAccepted) {
+                simulatorIdentityGuard.acceptInitializationContinuity(
+                    acceptedGeneration,
+                    acceptedSequence,
+                    receivedAtMs,
+                    fr.initializationContinuityTrackId);
+              }
+              boolean postPositioningSample =
+                  currentState == FollowState.DISTANCE_CALIBRATION
+                      || (currentState == FollowState.AUTO_POSITIONING
+                          && fr.initializationPositioningEvidence != null
+                          && (fr.initializationPositioningEvidence.phase
+                                  == InitializationPositioningEvidence.Phase.SETTLING
+                              || fr.initializationPositioningEvidence.phase
+                                  == InitializationPositioningEvidence.Phase.READY));
+              if (reidCoordinator != null
+                  && postPositioningSample
+                  && initializationCandidate != null
+                  && initializationTrack != null
+                  && mappedRecognitions.size() == 1
+                  && !targetTrackManager.isLockedAssociationCompeting()
+                  && InitializationFraming.evaluate(
+                          initializationCandidate.getLocation(),
+                          frameW,
+                          frameH,
+                          activeSensorOrientation)
+                      .fullBody()) {
+                ReIDCoordinator.InitializationSampleResult sample =
+                    reidCoordinator.collectConfirmedInitializationCandidate(
+                        workingFrame,
+                        initializationCandidate,
+                        activeSensorOrientation,
+                        initializationTrack.trackId,
+                        targetTrackManager.getLockedTrackId(),
+                        receivedAtMs,
+                        acceptedSequence,
+                        reidCoordinator.getSessionEpoch());
+                fr.initializationGallerySampleCount = sample.sampleCount;
+                fr.initializationGalleryReason = sample.reason;
+                String sampleEvent = sample.accepted + ":" + sample.reason + ":" + sample.sampleCount;
+                if (!sampleEvent.equals(lastInitializationGalleryEvent)
+                    && (sample.accepted || !"sample_interval".equals(sample.reason))) {
+                  lastInitializationGalleryEvent = sampleEvent;
+                  recordControlEvent(
+                      "initialization_gallery_sample",
+                      "accepted="
+                          + sample.accepted
+                          + ";track="
+                          + initializationTrack.trackId
+                          + ";source_frame="
+                          + acceptedSequence
+                          + ";count="
+                          + sample.sampleCount
+                          + ";reason="
+                          + sample.reason);
+                }
+              }
+              if (reidCoordinator != null
+                  && currentState != FollowState.CAPTURE_TARGET
+                  && currentState != FollowState.LOCKED_PENDING_CONFIRM
+                  && currentState != FollowState.AUTO_POSITIONING
+                  && currentState != FollowState.DISTANCE_CALIBRATION) {
+                reidCoordinator.closeInitializationSupplement();
+              }
+              String initializationContinuityEvent =
+                  fr.initializationContinuityValid
+                      + ":"
+                      + fr.initializationContinuityTrackId
+                      + ":"
+                      + fr.initializationContinuityReason;
+              if (!initializationContinuityEvent.equals(lastInitializationContinuityEvent)
+                  && fr.initializationContinuityTrackId >= 0) {
+                lastInitializationContinuityEvent = initializationContinuityEvent;
+                recordControlEvent(
+                    "initialization_continuity",
+                    "valid="
+                        + fr.initializationContinuityValid
+                        + ";accepted="
+                        + fr.initializationContinuityAccepted
+                        + ";track="
+                        + fr.initializationContinuityTrackId
+                        + ";frames="
+                        + fr.initializationContinuityFrames
+                        + ";reason="
+                        + fr.initializationContinuityReason);
+              }
               fr.simulatorIdentity = authorization;
               fr.trackingDecision = authorization == null ? null : authorization.tracking;
               fr.frameSequence = acceptedSequence;
@@ -1641,11 +1838,16 @@ public class BaseCartFollowFragment extends CameraFragment {
       } else if (r == fr.candidate) {
         colorType = COLOR_CANDIDATE;
       }
+      boolean identityCandidate =
+          fr.simulatorIdentity != null
+              && track != null
+              && track.trackId == fr.simulatorIdentity.trackId;
       if (useReleaseTargetOverlay()
           && r != captureCandidate
           && r != calibrationCandidate
           && r != pendingCandidate
           && r != fr.target
+          && !identityCandidate
           && (track == null || !targetTrackManager.isLockedTrack(track))) continue;
       if (fr.simulatorIdentity != null
           && !fr.simulatorIdentity.authorized
@@ -1688,19 +1890,32 @@ public class BaseCartFollowFragment extends CameraFragment {
                             ? "外观变化中 · 低档"
                             : green ? "连续保持" : permit.retainTarget ? "姿态适应中" : "身份存疑";
       }
-      if (useReleaseTargetOverlay()) label = colorType == COLOR_TARGET ? "目标已锁定" : "目标";
+      if (useReleaseTargetOverlay())
+        label = colorType == COLOR_TARGET ? "目标已锁定" : identityCandidate ? "正在确认目标" : "目标";
       boxes.add(new DrawBox(new RectF(r.getLocation()), colorType, label));
     }
     if (fr.detectionTierEvidence != null) {
       for (Detector.Recognition r : fr.detectionTierEvidence.lowConfidencePersons) {
         if (r == null || r.getLocation() == null || fr.persons.contains(r)) continue;
+        if (useReleaseTargetOverlay() && isInitializationStage(fr.state)) continue;
         boolean continued = fr.detectionTierEvidence.continuedLowConfidencePersons.contains(r);
         String label =
-            String.format(Locale.US, "%s %.2f", continued ? "低置信续接" : "低置信候选", r.getConfidence());
+            useReleaseTargetOverlay()
+                ? "目标检测不稳定"
+                : String.format(Locale.US, "%s %.2f", continued ? "低置信续接" : "低置信候选", r.getConfidence());
         boxes.add(new DrawBox(new RectF(r.getLocation()), COLOR_LOW_CONFIDENCE, label));
       }
     }
     return boxes;
+  }
+
+  static boolean isInitializationStage(FollowState state) {
+    return state == FollowState.CAPTURE_TARGET
+        || state == FollowState.LOCKED_PENDING_CONFIRM
+        || state == FollowState.AUTO_POSITIONING
+        || state == FollowState.DISTANCE_CALIBRATION
+        || state == FollowState.CONFIRMED_ARMED
+        || state == FollowState.READY_TO_FOLLOW;
   }
 
   private void drawOverlay(Canvas canvas) {

@@ -15,10 +15,11 @@ import org.openbot.cartfollow.voice.CartVoiceGuidance;
 public class ShoppingCartFragment extends RealCartFollowFragment {
   public static final int FIXED_MAXIMUM_GEAR = 21;
   private static final String WELCOME_SPOKEN_KEY = "shopping_cart_welcome_spoken";
-  private final CartVoiceGuidance voice = new CartVoiceGuidance();
+  private final CartVoiceGuidance voice = new CartVoiceGuidance(true);
   private boolean lastConnected;
   private String lastLogError = "";
   private boolean fallbackWelcomeSpoken;
+  private boolean positioningTimeoutStopped;
 
   @Override
   protected void onCartFollowViewCreated() {
@@ -41,6 +42,8 @@ public class ShoppingCartFragment extends RealCartFollowFragment {
             binding.shoppingStartSwitch.setChecked(false);
             binding.shoppingStatus.setText(error);
             Toast.makeText(requireContext(), error, Toast.LENGTH_SHORT).show();
+          } else {
+            positioningTimeoutStopped = false;
           }
         });
     binding.shoppingEmergencyStop.setOnClickListener(
@@ -68,9 +71,24 @@ public class ShoppingCartFragment extends RealCartFollowFragment {
   @Override protected void onFrameUiApplied(FollowStateMachine.FrameResult frame) {
     super.onFrameUiApplied(frame);
     if (binding == null || frame == null) return;
+    binding.confirmPanel.setVisibility(View.GONE);
+    boolean positioningTimedOut =
+        frame.initializationPositioningEvidence != null
+            && frame.initializationPositioningEvidence.phase
+                == InitializationPositioningEvidence.Phase.TIMEOUT;
     if (binding.shoppingStartSwitch.isChecked())
       binding.shoppingStatus.setText(releaseStatus(frame));
     voice.onFrame(frame);
+    if (positioningTimedOut && binding.shoppingStartSwitch.isChecked()) {
+      positioningTimeoutStopped = true;
+      recordControlEvent(
+          "positioning_timeout_stop",
+          "reverse_ms=" + frame.initializationPositioningEvidence.reverseElapsedMs);
+      stopReleaseFollowing("positioning_timeout");
+      if (binding != null)
+        binding.shoppingStatus.setText(
+            "取景未完成，小车已经停止。请调整站位后重新点击 Start");
+    }
     binding.confirmPanel.bringToFront();
     binding.shoppingEmergencyStop.bringToFront();
   }
@@ -92,7 +110,11 @@ public class ShoppingCartFragment extends RealCartFollowFragment {
     binding.shoppingEmergencyStop.setEnabled(!emergency);
     boolean running = binding.shoppingStartSwitch.isChecked();
     binding.shoppingStartSwitch.setEnabled(running || readiness.ready());
-    if (!running) binding.shoppingStatus.setText(readiness.message);
+    if (!running)
+      binding.shoppingStatus.setText(
+          positioningTimeoutStopped && readiness.ready()
+              ? "取景未完成，小车已经停止。请调整站位后重新点击 Start"
+              : readiness.message);
     if (lastConnected && !bleConnected) voice.event(CartVoiceGuidance.Event.DISCONNECTED);
     lastConnected = bleConnected;
   }
@@ -127,6 +149,7 @@ public class ShoppingCartFragment extends RealCartFollowFragment {
   @Override protected String diagnosticEntryName() { return "ShoppingCart"; }
   @Override protected boolean useReleaseTargetOverlay() { return true; }
   @Override protected boolean isReleasePresentation() { return true; }
+  @Override protected boolean autoConfirmCapturedTarget() { return true; }
   @Override protected int releaseMaximumGear() { return FIXED_MAXIMUM_GEAR; }
 
   @Override protected void onDiagnosticWriteFailure(String error) {
@@ -145,8 +168,8 @@ public class ShoppingCartFragment extends RealCartFollowFragment {
     binding.bottomPanel.setVisibility(View.GONE);
     binding.countdownText.setVisibility(View.GONE);
     binding.btnCancel.setVisibility(View.GONE);
-    binding.btnConfirm.setText("确认跟随");
-    binding.btnRetake.setText("重新采集");
+    binding.btnConfirm.setVisibility(View.GONE);
+    binding.btnRetake.setVisibility(View.GONE);
     if (binding.confirmPanel.getParent() != binding.shoppingReleasePanel) {
       ((ViewGroup) binding.confirmPanel.getParent()).removeView(binding.confirmPanel);
       ConstraintLayout.LayoutParams p = new ConstraintLayout.LayoutParams(
@@ -157,6 +180,7 @@ public class ShoppingCartFragment extends RealCartFollowFragment {
       p.bottomMargin = Math.round(8 * getResources().getDisplayMetrics().density);
       binding.shoppingReleasePanel.addView(binding.confirmPanel, p);
     }
+    binding.confirmPanel.setVisibility(View.GONE);
     binding.confirmPanel.bringToFront();
     binding.shoppingEmergencyStop.bringToFront();
   }
@@ -166,17 +190,22 @@ public class ShoppingCartFragment extends RealCartFollowFragment {
     if (frame.initializationPositioningEvidence != null
         && frame.initializationPositioningEvidence.phase
             == InitializationPositioningEvidence.Phase.TIMEOUT)
-      return "取景未完成，请调整站位后重新确认";
+      return "取景未完成，小车已经停止。请调整站位后重新点击 Start";
     switch (frame.state) {
       case CAPTURE_TARGET: return "请站到镜头前并保持稳定";
-      case LOCKED_PENDING_CONFIRM: return "请确认要跟随的目标";
+      case LOCKED_PENDING_CONFIRM: return "目标轨迹失效，正在重新采集";
       case AUTO_POSITIONING:
+        if (frame.initializationPositioningEvidence == null
+            && frame.distanceDiagnosticText != null
+            && frame.distanceDiagnosticText.contains("采集完成"))
+          return "目标采集完成，请保持站立";
         if (frame.initializationPositioningEvidence != null) {
           switch (frame.initializationPositioningEvidence.phase) {
             case REVERSING: return "正在自动后退取景";
             case SETTLING:
             case READY: return "全身已入镜，正在初始化";
-            case TIMEOUT: return "取景未完成，请调整站位后重新确认";
+            case TIMEOUT:
+              return "取景未完成，小车已经停止。请调整站位后重新点击 Start";
             default: break;
           }
         }
@@ -185,8 +214,24 @@ public class ShoppingCartFragment extends RealCartFollowFragment {
       case CONFIRMED_ARMED:
       case REACQUIRE_TARGET: return "全身已入镜，正在初始化";
       case READY_TO_FOLLOW: return "三秒后开始跟随";
+      case IDENTITY_UNCERTAIN:
+        if (frame.detectionTierEvidence != null
+            && (frame.detectionTierEvidence.selectedCandidateIsLowConfidence
+                || !frame.detectionTierEvidence.lowConfidencePersons.isEmpty()))
+          return "目标检测不稳定";
+        return frame.simulatorIdentity != null && frame.simulatorIdentity.trackId >= 0
+            ? "正在确认目标" : "目标暂时离开画面，正在安全寻找";
       case FOLLOW:
-      case FOLLOW_CAUTION: return frame.behaviorDecision != null
+      case FOLLOW_CAUTION:
+        if (frame.simulatorIdentity != null
+            && (!frame.simulatorIdentity.motionAllowed
+                || (!frame.simulatorIdentity.authorized
+                    && !frame.simulatorIdentity.isContinuous())))
+          return frame.detectionTierEvidence != null
+                  && frame.detectionTierEvidence.selectedCandidateIsLowConfidence
+              ? "目标检测不稳定"
+              : "正在确认目标";
+        return frame.behaviorDecision != null
           && frame.behaviorDecision.selectedAction == BehaviorAction.BLOCKED_WAIT
           ? "前方受阻，已暂停" : "正在跟随";
       case LOST:
